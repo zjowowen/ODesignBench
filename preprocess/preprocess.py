@@ -58,17 +58,51 @@ class Preprocess():
         print(f"[timing] preprocess.{action}: {elapsed:.2f}s")
         return result
 
+    def _assert_unique_output_names(
+        self,
+        pairs: list[tuple[Path, str]],
+        *,
+        stage: str,
+        input_dir: str,
+    ) -> None:
+        seen: dict[str, list[str]] = {}
+        for src_path, output_name in pairs:
+            seen.setdefault(output_name, []).append(str(src_path))
+        duplicates = {name: paths for name, paths in seen.items() if len(paths) > 1}
+        if duplicates:
+            duplicate_lines = []
+            for name, paths in sorted(duplicates.items()):
+                duplicate_lines.append(f"{name}: {'; '.join(paths)}")
+            joined = "\n".join(duplicate_lines[:10])
+            raise ValueError(
+                f"Duplicate output filenames detected in {stage} for input_dir='{input_dir}'. "
+                "Preserved filenames would overwrite each other.\n"
+                f"{joined}"
+            )
+
 
     def format_output_cif(self, input_dir: str, output_dir: str):
-        
+
         os.makedirs(output_dir, exist_ok=True)
-        for case_dir in Path(input_dir).iterdir():
-            for cif_path in case_dir.rglob("*.cif"):
-                # Preserve original filename instead of renaming
-                original_name = cif_path.name
-                output_path = os.path.join(output_dir, original_name)
-                shutil.copy(cif_path, output_path)
-                print(f"Copied CIF file to {output_path}")
+        input_path = Path(input_dir)
+        direct_cifs = sorted(input_path.glob("*.cif"))
+        case_dirs = sorted([case_dir for case_dir in input_path.iterdir() if case_dir.is_dir()])
+
+        pairs: list[tuple[Path, str]] = []
+        if direct_cifs:
+            for cif_path in direct_cifs:
+                pairs.append((cif_path, cif_path.name))
+        else:
+            for case_dir in case_dirs:
+                for cif_path in sorted(case_dir.rglob("*.cif")):
+                    pairs.append((cif_path, cif_path.name))
+
+        self._assert_unique_output_names(pairs, stage="format_output_cif", input_dir=input_dir)
+
+        for cif_path, output_name in pairs:
+            output_path = os.path.join(output_dir, output_name)
+            shutil.copy(cif_path, output_path)
+            print(f"Copied CIF file to {output_path}")
         return self._make_result(stage="preprocess.format_output_cif", output_dir=output_dir)
 
     def format_output_pdb(self, input_dir: str, output_dir: str, use_trb_for_b_factor: bool = True):
@@ -89,73 +123,40 @@ class Preprocess():
         os.makedirs(output_dir, exist_ok=True)
         input_path = Path(input_dir)
 
-        # Case 1: Standard layout – one subdirectory per target (preserve original filenames)
-        for case_dir in input_path.iterdir():
-            if not case_dir.is_dir():
-                continue
-            for cif_path in case_dir.rglob("*.cif"):
-                # Preserve original filename (change extension to .pdb)
-                original_name = cif_path.stem + ".pdb"
-                output_path = os.path.join(output_dir, original_name)
-                atom_array = self._process_structure_with_b_factor(str(cif_path), use_trb_for_b_factor)
-                atom_array = self._ensure_valid_b_factor(atom_array)
-                io.save_structure(output_path, atom_array)
-                print(f"Converted CIF to PDB and saved to {output_path}")
-            for pdb_path in case_dir.rglob("*.pdb"):
-                # Preserve original filename
-                original_name = pdb_path.name
-                output_path = os.path.join(output_dir, original_name)
-                atom_array = self._process_structure_with_b_factor(str(pdb_path), use_trb_for_b_factor)
-                atom_array = self._ensure_valid_b_factor(atom_array)
-                io.save_structure(output_path, atom_array)
-                print(f"Copied PDB to {output_path}")
+        direct_pdbs = sorted(input_path.glob("*.pdb"))
+        direct_cifs = sorted(input_path.glob("*.cif"))
+        subdirs = sorted([d for d in input_path.iterdir() if d.is_dir()])
 
-        # Case 2: Flat layout – PDB/CIF files directly under input_dir or in a single subdirectory
-        # This makes it easier to run AME on a small custom set of backbones
-        # Check if there's only one subdirectory with files (common case: structures/ subdirectory)
-        subdirs = [d for d in input_path.iterdir() if d.is_dir()]
-        if len(subdirs) == 1 and len(list(input_path.glob("*.pdb"))) == 0 and len(list(input_path.glob("*.cif"))) == 0:
-            # Single subdirectory with no files at root level - treat as flat layout
-            # Use original filenames to preserve meaningful names for CSV matching
+        pairs: list[tuple[Path, str]] = []
+        if direct_pdbs or direct_cifs:
+            for pdb_path in direct_pdbs:
+                pairs.append((pdb_path, f"{pdb_path.stem}.pdb"))
+            for cif_path in direct_cifs:
+                pairs.append((cif_path, f"{cif_path.stem}.pdb"))
+        elif len(subdirs) == 1:
             single_subdir = subdirs[0]
-            for cif_path in single_subdir.rglob("*.cif"):
-                original_name = cif_path.stem
-                output_path = os.path.join(output_dir, f"{original_name}.pdb")
-                atom_array = self._process_structure_with_b_factor(str(cif_path), use_trb_for_b_factor)
-                atom_array = self._ensure_valid_b_factor(atom_array)
-                io.save_structure(output_path, atom_array)
-                print(f"Converted CIF to PDB and saved to {output_path}")
-            for pdb_path in single_subdir.rglob("*.pdb"):
-                original_name = pdb_path.stem
-                output_path = os.path.join(output_dir, f"{original_name}.pdb")
-                atom_array = self._process_structure_with_b_factor(str(pdb_path), use_trb_for_b_factor)
-                atom_array = self._ensure_valid_b_factor(atom_array)
-                io.save_structure(output_path, atom_array)
-                print(f"Copied PDB to {output_path}")
+            for pdb_path in sorted(single_subdir.rglob("*.pdb")):
+                pairs.append((pdb_path, f"{pdb_path.stem}.pdb"))
+            for cif_path in sorted(single_subdir.rglob("*.cif")):
+                pairs.append((cif_path, f"{cif_path.stem}.pdb"))
         else:
-            # True flat layout – PDB/CIF files directly under input_dir
-            flat_pdbs = list(input_path.glob("*.pdb"))
-            flat_cifs = list(input_path.glob("*.cif"))
-            # Use original filename (without extension) for flat layouts to preserve meaningful names
-            # Fallback to folder name if needed
+            for case_dir in subdirs:
+                for pdb_path in sorted(case_dir.rglob("*.pdb")):
+                    pairs.append((pdb_path, pdb_path.name))
+                for cif_path in sorted(case_dir.rglob("*.cif")):
+                    pairs.append((cif_path, f"{cif_path.stem}.pdb"))
 
-            for pdb_path in flat_pdbs:
-                # Use original filename (without extension) as the output name
-                original_name = pdb_path.stem
-                output_path = os.path.join(output_dir, f"{original_name}.pdb")
-                atom_array = self._process_structure_with_b_factor(str(pdb_path), use_trb_for_b_factor)
-                atom_array = self._ensure_valid_b_factor(atom_array)
-                io.save_structure(output_path, atom_array)
-                print(f"Copied PDB to {output_path}")
+        self._assert_unique_output_names(pairs, stage="format_output_pdb", input_dir=input_dir)
 
-            for cif_path in flat_cifs:
-                # Use original filename (without extension) as the output name
-                original_name = cif_path.stem
-                output_path = os.path.join(output_dir, f"{original_name}.pdb")
-                atom_array = self._process_structure_with_b_factor(str(cif_path), use_trb_for_b_factor)
-                atom_array = self._ensure_valid_b_factor(atom_array)
-                io.save_structure(output_path, atom_array)
+        for struct_path, output_name in pairs:
+            output_path = os.path.join(output_dir, output_name)
+            atom_array = self._process_structure_with_b_factor(str(struct_path), use_trb_for_b_factor)
+            atom_array = self._ensure_valid_b_factor(atom_array)
+            io.save_structure(output_path, atom_array)
+            if struct_path.suffix.lower() == ".cif":
                 print(f"Converted CIF to PDB and saved to {output_path}")
+            else:
+                print(f"Copied PDB to {output_path}")
         return self._make_result(
             stage="preprocess.format_output_pdb",
             output_dir=output_dir,
@@ -282,18 +283,22 @@ class Preprocess():
     def format_output_ligand(self, input_dir: str, output_dir: str):
 
         os.makedirs(output_dir, exist_ok=True)
-        for case_dir in Path(input_dir).iterdir():
-            for cif_path in case_dir.rglob("*.cif"):
-                # Preserve original filename instead of renaming
-                original_name = cif_path.name
-                output_path = os.path.join(output_dir, original_name)
-                # trb_path = os.path.join(os.path.dirname(cif_path), "traceback.pkl")
-                # output_trb_path = os.path.join(output_dir, original_name.replace(".cif", ".pkl"))
-                cif_file = pdbx.CIFFile.read(cif_path)
-                atom_array = pdbx.get_structure(cif_file, model=1, extra_fields=['b_factor', 'occupancy'])
-                atom_array.atom_name[atom_array.hetero] = np.char.add(['C']*sum(atom_array.hetero), np.array(range(sum(atom_array.hetero)), dtype=np.str_))
-                io.save_structure(output_path, atom_array)
-                # shutil.copy(trb_path, output_trb_path)
+        input_path = Path(input_dir)
+        pairs: list[tuple[Path, str]] = []
+        for case_dir in sorted(input_path.iterdir()):
+            if not case_dir.is_dir():
+                continue
+            for cif_path in sorted(case_dir.rglob("*.cif")):
+                pairs.append((cif_path, cif_path.name))
+
+        self._assert_unique_output_names(pairs, stage="format_output_ligand", input_dir=input_dir)
+
+        for cif_path, output_name in pairs:
+            output_path = os.path.join(output_dir, output_name)
+            cif_file = pdbx.CIFFile.read(cif_path)
+            atom_array = pdbx.get_structure(cif_file, model=1, extra_fields=['b_factor', 'occupancy'])
+            atom_array.atom_name[atom_array.hetero] = np.char.add(['C']*sum(atom_array.hetero), np.array(range(sum(atom_array.hetero)), dtype=np.str_))
+            io.save_structure(output_path, atom_array)
         return self._make_result(stage="preprocess.format_output_ligand", output_dir=output_dir)
     
     def format_output_ligand_for_protein_binding_ligand_evaluation(self, input_dir: str, output_dir: str):
