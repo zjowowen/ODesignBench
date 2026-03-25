@@ -445,19 +445,28 @@ def _prepare_refold_af3_from_backbones(ctx: PipelineContext) -> None:
     ctx.runtime["refold_prepare"] = ctx.refold_model.run(
         action="make_af3_json_multi_process",
         backbone_dir=str(ctx.pipeline_dir / "inverse_fold" / "backbones"),
-        output_path=str(ctx.pipeline_dir / "refold" / "af3_input.json"),
+        output_path=str(ctx.pipeline_dir / "refold" / "af3_inputs"),
     )
 
 
 def _prepare_refold_af3_pbp_target_msa(ctx: PipelineContext) -> None:
     pbp_info_df = ctx.runtime.get("pbp_info_df", None)
     if pbp_info_df is None:
-        raise RuntimeError("pbp_info_df not found in ctx.runtime; ensure inversefold stage ran first")
+        pbp_info_csv = _resolve_metadata_csv(
+            ctx,
+            cfg_key="pbp_info_csv",
+            preferred_names=["pbp_info.csv"],
+            csv_label="PBP info CSV",
+        )
+        from inversefold.pbp_csv_utils import load_pbp_info_csv
+        pbp_info_df = load_pbp_info_csv(pbp_info_csv)
+        ctx.runtime["pbp_info_csv"] = pbp_info_csv
+        ctx.runtime["pbp_info_df"] = pbp_info_df
 
     ctx.runtime["refold_prepare"] = ctx.refold_model.run(
         action="make_af3_json_pbp_target_msa",
         backbone_dir=str(ctx.pipeline_dir / "inverse_fold" / "backbones"),
-        output_path=str(ctx.pipeline_dir / "refold" / "af3_input.json"),
+        output_path=str(ctx.pipeline_dir / "refold" / "af3_inputs"),
         pbp_info_df=pbp_info_df,
     )
 
@@ -466,14 +475,14 @@ def _prepare_refold_af3_from_inverse_fold(ctx: PipelineContext) -> None:
     ctx.runtime["refold_prepare"] = ctx.refold_model.run(
         action="make_af3_json_multi_process",
         backbone_dir=str(ctx.pipeline_dir / "inverse_fold"),
-        output_path=str(ctx.pipeline_dir / "refold" / "af3_input.json"),
+        output_path=str(ctx.pipeline_dir / "refold" / "af3_inputs"),
     )
 
 
 def _run_refold_af3(ctx: PipelineContext) -> None:
     ctx.runtime["refold"] = ctx.refold_model.run(
         action="run_alphafold3",
-        input_json=str(ctx.pipeline_dir / "refold" / "af3_input.json"),
+        input_json=str(ctx.pipeline_dir / "refold" / "af3_inputs"),
         output_dir=str(ctx.pipeline_dir / "refold" / "af3_out"),
     )
 

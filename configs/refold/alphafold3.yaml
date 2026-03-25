@@ -1,6 +1,8 @@
 name: alphafold3
 # AF3 run script (override at runtime: refold.af3_exec=/path/to/run_af3.sh)
 af3_exec: ${oc.env:AF3_EXEC,refold/run_af3.sh}
+# AF3 JSON dialect expected by current runner implementation.
+af3_input_dialect: alphafoldserver
 # false = no MSA search (faster). true = full data pipeline
 run_data_pipeline: false
 exp_name: test

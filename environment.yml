@@ -74,6 +74,7 @@ dependencies:
       - mpmath
       - networkx
       - numpy
+      - numba>=0.64.0
       - pyparsing
       - sympy
       - typing_extensions

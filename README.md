@@ -180,11 +180,13 @@ The wrapper expects:
 ### Configure environment variables
 Set these before running any pipeline that uses AF3 refolding:
 ```bash
-export AF3_BASE=/path/to/af3              # must contain: $AF3_BASE/model
+export AF3_BASE=/path/to/af3              # must contain: $AF3_BASE/models
 export AF3_PUBLIC_DB=/path/to/public_databases
 # Optional: if your docker image tag differs
 export AF3_DOCKER_IMAGE=alphafold3
 ```
+
+**Note on PBP target MSA injection:** PBP tasks inject pre-computed MSA for the target chain via a runtime patch (`AF3_DIALECT_PATCH=true`, default). The assets are expected at `/assets`. Set `AF3_DIALECT_PATCH=false` to disable the patch.
 
 ### Run
 After exporting the variables above, run the normal pipeline commands (e.g. `scripts/run_pbp_pipeline.py` with `refold=af3`).

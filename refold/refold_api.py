@@ -158,7 +158,6 @@ class ReFold:
     def run(self, action: str, **kwargs) -> dict[str, Any]:
         dispatch = {
             "run_alphafold3": self.run_alphafold3,
-            "alphafold3": self.run_alphafold3,
             "run_chai1": self.run_chai1,
             "chai1": self.run_chai1,
             "run_esmfold": self.run_esmfold,
@@ -186,6 +185,7 @@ class ReFold:
     def run_alphafold3(self, input_json: str, output_dir: str) -> dict[str, Any]:
         output_dir = str(Path(output_dir).resolve())
         input_json = str(Path(input_json).resolve())
+        dialect_fix = self._normalize_af3_input_dialect(input_json)
         gpus_str = _gpus_to_str(self.config.gpus)
         cmd = ["bash", f"{self.config.refold.af3_exec}", f"{self.config.refold.exp_name}", f"{input_json}", f"{output_dir}", gpus_str, f"{self.config.refold.run_data_pipeline}", f"{self.config.refold.cache_dir}"]
         subprocess.run(cmd, check=True)
@@ -203,8 +203,50 @@ class ReFold:
         return self._make_result(
             stage="refold.run_alphafold3",
             outputs={"input_json": str(input_json), "output_dir": str(output_dir)},
-            details={"num_cif_files": len(cif_files)},
+            details={"num_cif_files": len(cif_files), **dialect_fix},
         )
+
+    def _normalize_af3_input_dialect(self, input_json: str) -> dict[str, Any]:
+        """
+        Ensure AF3 input JSON dialect matches the expected format.
+        Normalizes stale input files in-place to avoid runtime failure.
+        Default dialect is 'alphafoldserver' (AlphaFold Server API format).
+        """
+        expected = str(getattr(self.config.refold, "af3_input_dialect", "alphafoldserver"))
+        try:
+            with open(input_json, "r") as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"Warning: Failed to inspect AF3 input dialect for {input_json}: {exc}")
+            return {
+                "af3_expected_dialect": expected,
+                "af3_dialect_normalized": False,
+                "af3_dialect_updates": 0,
+            }
+
+        jobs = payload if isinstance(payload, list) else [payload]
+        updates = 0
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            current = str(job.get("dialect", "")).strip()
+            if current != expected:
+                job["dialect"] = expected
+                updates += 1
+
+        if updates > 0:
+            with open(input_json, "w") as f:
+                json.dump(payload, f, indent=4)
+            print(
+                f"[refold] Normalized AF3 input dialect to '{expected}' for "
+                f"{updates} job(s): {input_json}"
+            )
+
+        return {
+            "af3_expected_dialect": expected,
+            "af3_dialect_normalized": updates > 0,
+            "af3_dialect_updates": updates,
+        }
     
     def run_chai1(self, fasta_list: list, output_dir: str) -> dict[str, Any]:
         
@@ -491,6 +533,7 @@ class ReFold:
         paired_msa_cache: dict | None = None,
         template_cache: dict | None = None,
         use_backbone_as_template: bool = False,
+        dialect: str = "alphafoldserver",
         *,
         # PBP-specific: inject only the target chain's MSA into the AF3 input.
         # Binder's MSA is intentionally excluded (set to empty strings).
@@ -501,12 +544,18 @@ class ReFold:
         Build AF3 input JSON from backbone PDB/CIF (sequences only).
         use_backbone_as_template is ignored: the AF3 container does not support custom templates
         (templatesPath is rejected). Refold is sequence-based only (no CDR-only or scaffold fixing).
+
+        Server API dialect (alphafoldserver) key format:
+          proteinChain, rnaSequence, dnaSequence, ligand, ion
+        AF3 native dialect (alphafold3) key format:
+          protein, rna, dna, ligand (with full nested dicts)
         """
+        is_server = dialect == "alphafoldserver"
         single_input = {
             "name": backbone_path.stem,
             "sequences": [],
             "modelSeeds": [1],
-            "dialect": "alphafold3",
+            "dialect": dialect,
             "version": 1
         }
         if backbone_path.suffix == '.cif':
@@ -519,58 +568,75 @@ class ReFold:
         for chain_id in chain_ids:
             chain_atom_array = atom_array[atom_array.chain_id == chain_id]
             if chain_atom_array.hetero.all():
-                ligand_data = None
-                # Get ccdCode first
                 ccdCode = chain_atom_array.res_name[0].upper()
-    
-                # designed ligand
+
+                # designed ligand (-L): use SMILES
                 if ccdCode == '-L':
                     smiles = ReFold.get_smiles_from_ligand(chain_atom_array)
                     if smiles:
-                        ligand_data = {
-                            "ligand": {
-                                "smiles": smiles,
-                                "id": [str(chain_id)]
-                            }
-                        }
+                        if is_server:
+                            # Server API does not support SMILES-based ligands.
+                            # Emit as AF3 native format with ccdCodes (won't parse
+                            # but preserves SMILES in output for debugging).
+                            print(
+                                f"Warning: SMILES ligand in chain {chain_id} is not "
+                                f"supported in alphafoldserver dialect. "
+                                f"SMILES='{smiles}'. Skipping this entity."
+                            )
+                        else:
+                            # AF3 native: ligand dict with smiles + id
+                            single_input["sequences"].append({
+                                "ligand": {
+                                    "smiles": smiles,
+                                    "id": [str(chain_id)]
+                                }
+                            })
                     else:
                         print(f"Warning: Failed to generate SMILES for designed ligand in chain {chain_id}")
-                        continue
+                    continue
+
+                # standard ligand / ion
+                if is_server:
+                    # Server API: ligand value is a plain string ("CCD_Xxx" or ion name)
+                    if ccdCode in ('NA', 'K', 'MG', 'CA', 'ZN', 'MN', 'FE', 'FE2', 'CO', 'CU', 'CU1'):
+                        ligand_seq = ccdCode  # ion
+                    else:
+                        ligand_seq = f"CCD_{ccdCode}"
+                    single_input["sequences"].append({"ligand": ligand_seq})
                 else:
-                    ligand_data = {
+                    # AF3 native: ligand dict with ccdCodes (list) + id
+                    single_input["sequences"].append({
                         "ligand": {
-                            "ccdCodes": ccdCode,
+                            "ccdCodes": [ccdCode],
                             "id": [str(chain_id)]
                         }
-                    }
-                single_input["sequences"].append(ligand_data)
+                    })
 
-            elif np.isin(chain_atom_array.res_name, ['DA', 'DC', 'DG', 'DT','DN']).all():
-                # sequence = str(struc.to_sequence(chain_atom_array)[0][0])
+            elif np.isin(chain_atom_array.res_name, ['DA', 'DC', 'DG', 'DT', 'DN']).all():
                 sequence = get_nucleic_acid_sequence(chain_atom_array)
-                single_input["sequences"].append({
-                    "dna": {
-                        "sequence": sequence,
-                        "id": [str(chain_id)]
-                    }
-                })
-            elif np.isin(chain_atom_array.res_name, ['A', 'C', 'G', 'U','N']).all():
-                # sequence = str(struc.to_sequence(chain_atom_array)[0][0])
+                if is_server:
+                    # Server API dialect: dnaSequence only accepts 'sequence'
+                    single_input["sequences"].append({"dnaSequence": {"sequence": sequence}})
+                else:
+                    single_input["sequences"].append({
+                        "dna": {"sequence": sequence, "id": [str(chain_id)]}
+                    })
+
+            elif np.isin(chain_atom_array.res_name, ['A', 'C', 'G', 'U', 'N']).all():
                 sequence = get_nucleic_acid_sequence(chain_atom_array)
-                s = {
-                    "rna": {
-                        "sequence": sequence,
-                        "id": [str(chain_id)]
-                    }
-                }
-                if not run_data_pipeline:
-                    s["rna"]["unpairedMsa"] = ""
-                single_input["sequences"].append(s)
+                if is_server:
+                    # Server API dialect: rnaSequence only accepts 'sequence'
+                    single_input["sequences"].append({"rnaSequence": {"sequence": sequence}})
+                else:
+                    s = {"rna": {"sequence": sequence, "id": [str(chain_id)]}}
+                    if not run_data_pipeline:
+                        s["rna"]["unpairedMsa"] = ""
+                    single_input["sequences"].append(s)
+
             else:
                 try:
                     sequence = str(struc.to_sequence(chain_atom_array, allow_hetero=True)[0][0])
                 except BadStructureError:
-                    # Replace non-standard residue names (e.g. UNK from LigandMPNN) so biotite can parse
                     standard_aa = set(struc_info.amino_acid_names())
                     res_names = chain_atom_array.res_name.copy()
                     non_std = ~np.isin(res_names, list(standard_aa))
@@ -581,33 +647,51 @@ class ReFold:
                         sequence = str(struc.to_sequence(chain_copy, allow_hetero=True)[0][0])
                     else:
                         raise
-                s = {
-                    "protein": {
-                        "sequence": sequence,
-                        "id": [str(chain_id)]
-                    }
-                }
-                if not run_data_pipeline:
-                    if target_chain_id is not None:
-                        # PBP rule: only target chain gets unpaired MSA; everything else (including binder) is excluded.
-                        if str(chain_id) == str(target_chain_id) and target_unpaired_msa_path:
-                            s["protein"]["unpairedMsaPath"] = str(target_unpaired_msa_path)
+
+                if is_server:
+                    # Server API dialect: proteinChain accepts 'sequence' + MSA fields (with patch).
+                    # The AF3_DIALECT_PATCH in run_af3.sh extends from_alphafoldserver_dict
+                    # to also read unpairedMsaPath/pairedMsaPath/templates fields.
+                    pc = {"sequence": sequence}
+                    if not run_data_pipeline:
+                        if target_chain_id is not None:
+                            if str(chain_id) == str(target_chain_id) and target_unpaired_msa_path:
+                                pc["unpairedMsaPath"] = str(target_unpaired_msa_path)
+                            else:
+                                pc["unpairedMsa"] = ""
+                            pc["pairedMsa"] = ""
+                            pc["templates"] = []
                         else:
-                            s["protein"]["unpairedMsa"] = ""
-                        # PBP rule: exclude paired MSA (binder template/binder-MSA coevolution signals).
-                        s["protein"]["pairedMsa"] = ""
-                    else:
-                        # Generic rule: optional MSA caches by sequence.
-                        if unpaired_msa_cache and sequence in unpaired_msa_cache:
-                            s["protein"]["unpairedMsaPath"] = unpaired_msa_cache[sequence]
-                        else:
-                            s["protein"]["unpairedMsa"] = ""
-                        if paired_msa_cache and sequence in paired_msa_cache:
-                            s["protein"]["pairedMsaPath"] = paired_msa_cache[sequence]
-                        else:
+                            if unpaired_msa_cache and sequence in unpaired_msa_cache:
+                                pc["unpairedMsaPath"] = unpaired_msa_cache[sequence]
+                            else:
+                                pc["unpairedMsa"] = ""
+                            if paired_msa_cache and sequence in paired_msa_cache:
+                                pc["pairedMsaPath"] = paired_msa_cache[sequence]
+                            else:
+                                pc["pairedMsa"] = ""
+                            pc["templates"] = []
+                    s = {"proteinChain": pc}
+                else:
+                    s = {"protein": {"sequence": sequence, "id": [str(chain_id)]}}
+                    if not run_data_pipeline:
+                        if target_chain_id is not None:
+                            if str(chain_id) == str(target_chain_id) and target_unpaired_msa_path:
+                                s["protein"]["unpairedMsaPath"] = str(target_unpaired_msa_path)
+                            else:
+                                s["protein"]["unpairedMsa"] = ""
                             s["protein"]["pairedMsa"] = ""
-                    # Note: AF3 container rejects templatesPath - use templates: [] (no custom template)
-                    s["protein"]["templates"] = []
+                            s["protein"]["templates"] = []
+                        else:
+                            if unpaired_msa_cache and sequence in unpaired_msa_cache:
+                                s["protein"]["unpairedMsaPath"] = unpaired_msa_cache[sequence]
+                            else:
+                                s["protein"]["unpairedMsa"] = ""
+                            if paired_msa_cache and sequence in paired_msa_cache:
+                                s["protein"]["pairedMsaPath"] = paired_msa_cache[sequence]
+                            else:
+                                s["protein"]["pairedMsa"] = ""
+                            s["protein"]["templates"] = []
                 single_input["sequences"].append(s)
         return single_input
     
@@ -674,13 +758,14 @@ class ReFold:
         unpaired = _load_json_opt('unpaired_msa_cache')
         paired = _load_json_opt('paired_msa_cache')
         tmpl = _load_json_opt('template_cache')
+        dialect = str(getattr(self.config.refold, "af3_input_dialect", "alphafoldserver"))
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.refold.num_workers) as executor:
             futures = []
             for backbone_path in backbone_path_list:
                 future = executor.submit(
                     self.make_af3_json_from_backbone, backbone_path, self.config.refold.run_data_pipeline,
                     unpaired_msa_cache=unpaired, paired_msa_cache=paired, template_cache=tmpl,
-                    use_backbone_as_template=use_backbone_as_template
+                    use_backbone_as_template=use_backbone_as_template, dialect=dialect
                 )
                 futures.append(future)
             af3_input_list = [future.result() for future in concurrent.futures.as_completed(futures)]
@@ -757,6 +842,7 @@ class ReFold:
         def _build_one(backbone_path: Path) -> dict[str, Any]:
             pbp_info = match_pdb_to_pbp_info(backbone_path, pbp_info_df) if pbp_info_df is not None else None
             target_chain_id = pbp_info["target_chain"] if pbp_info is not None else "B"
+            dialect = str(getattr(self.config.refold, "af3_input_dialect", "alphafoldserver"))
 
             target_id = infer_target_id(backbone_path.stem)
             msa_path = pbp_msa_root / target_id / "non_pairing.a3m"
@@ -773,6 +859,7 @@ class ReFold:
                 paired_msa_cache=None,
                 template_cache=None,
                 use_backbone_as_template=use_backbone_as_template,
+                dialect=dialect,
                 target_chain_id=target_chain_id,
                 target_unpaired_msa_path=str(msa_path),
             )
