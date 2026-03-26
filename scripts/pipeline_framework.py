@@ -13,6 +13,7 @@ import sys
 import shutil
 import subprocess
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -488,11 +489,117 @@ def _prepare_refold_af3_from_inverse_fold(ctx: PipelineContext) -> None:
 
 
 def _run_refold_af3(ctx: PipelineContext) -> None:
-    ctx.runtime["refold"] = ctx.refold_model.run(
-        action="run_alphafold3",
-        input_json=str(ctx.pipeline_dir / "refold" / "af3_inputs"),
-        output_dir=str(ctx.pipeline_dir / "refold" / "af3_out"),
-    )
+    """
+    Run AlphaFold3 refold stage. Supports multi-GPU parallel execution.
+
+    When multiple GPUs are available, splits the AF3 input JSON into N parts
+    (one per GPU) and runs N parallel AF3 instances, each on a single GPU.
+    """
+    input_json_path = ctx.pipeline_dir / "refold" / "af3_inputs"
+    output_base_dir = ctx.pipeline_dir / "refold" / "af3_out"
+    gpu_list = ctx.gpu_list
+
+    # Load AF3 input JSON
+    with open(input_json_path, "r") as f:
+        all_jobs = json.load(f)
+    
+    if not isinstance(all_jobs, list):
+        all_jobs = [all_jobs]
+    
+    num_gpus = len(gpu_list)
+    num_jobs = len(all_jobs)
+    
+    if num_gpus <= 1 or num_jobs <= 1:
+        # Single GPU or single job: run directly
+        ctx.runtime["refold"] = ctx.refold_model.run(
+            action="run_alphafold3",
+            input_json=str(input_json_path),
+            output_dir=str(output_base_dir),
+        )
+        return
+    
+    # Multi-GPU parallel execution: split jobs across GPUs
+    print(f"[refold] Multi-GPU mode: {num_gpus} GPUs, {num_jobs} jobs, distributing...")
+    
+    # Split jobs evenly across GPUs
+    jobs_per_gpu = [[] for _ in range(num_gpus)]
+    for i, job in enumerate(all_jobs):
+        gpu_idx = i % num_gpus
+        jobs_per_gpu[gpu_idx].append(job)
+    
+    # Create subdirectories for each GPU
+    subdirs = []
+    for i, gpu in enumerate(gpu_list):
+        subdir = output_base_dir / f"gpu_{gpu}"
+        subdir.mkdir(parents=True, exist_ok=True)
+        subdirs.append((gpu, subdir))
+    
+    # Write split JSON files
+    split_json_files = []
+    for gpu_idx, (gpu_id, subdir) in enumerate(subdirs):
+        split_json = subdir / "af3_inputs_split.json"
+        with open(split_json, "w") as f:
+            json.dump(jobs_per_gpu[gpu_idx], f, indent=2)
+        split_json_files.append((gpu_id, split_json, subdir))
+        print(f"[refold] GPU {gpu_id}: {len(jobs_per_gpu[gpu_idx])} jobs -> {subdir}")
+    
+    # Run AF3 in parallel on each GPU
+    def run_af3_on_gpu(gpu_id: str, split_json: Path, output_dir: Path) -> dict:
+        """Run AF3 on a single GPU."""
+        print(f"[refold] Starting AF3 on GPU {gpu_id}...")
+        t0 = perf_counter()
+        
+        # Call run_alphafold3 with single GPU
+        result = ctx.refold_model.run(
+            action="run_alphafold3_single_gpu",
+            input_json=str(split_json),
+            output_dir=str(output_dir),
+            gpu=gpu_id,
+        )
+        
+        elapsed = perf_counter() - t0
+        print(f"[refold] GPU {gpu_id} finished in {elapsed:.1f}s")
+        return result
+    
+    results = []
+    with ThreadPoolExecutor(max_workers=num_gpus) as executor:
+        futures = {
+            executor.submit(run_af3_on_gpu, gpu_id, split_json, output_dir): gpu_id
+            for gpu_id, split_json, output_dir in split_json_files
+        }
+        
+        for future in as_completed(futures):
+            gpu_id = futures[future]
+            try:
+                result = future.result()
+                results.append((gpu_id, result))
+            except Exception as e:
+                print(f"[refold] ERROR: GPU {gpu_id} failed: {e}")
+                raise
+    
+    # Consolidate results
+    total_cif_files = 0
+    for gpu_id, result in results:
+        if isinstance(result, dict) and "details" in result:
+            total_cif_files += result["details"].get("num_cif_files", 0)
+    
+    # Move all CIF files to the main output directory
+    output_base_dir.mkdir(parents=True, exist_ok=True)
+    for gpu_id, subdir in subdirs:
+        for cif_file in subdir.rglob("*.cif"):
+            dest = output_base_dir / cif_file.name
+            if dest.exists():
+                dest.unlink()
+            shutil.move(str(cif_file), str(dest))
+    
+    ctx.runtime["refold"] = {
+        "stage": "refold.run_alphafold3_multi_gpu",
+        "num_gpus": num_gpus,
+        "num_jobs": num_jobs,
+        "results": results,
+        "details": {"total_cif_files": total_cif_files},
+    }
+    print(f"[refold] Multi-GPU AF3 completed: {total_cif_files} CIF files in {output_base_dir}")
 
 
 def _prepare_refold_chai1(ctx: PipelineContext) -> None:

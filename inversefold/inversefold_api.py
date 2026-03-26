@@ -553,6 +553,7 @@ class InverseFold:
                 f'--temperature {self.config.inversefold.temperature} '
                 f'--seed {self.config.inversefold.seed} '
                 f'--fixed_residues_multi "{worker_json_path}"' # <-- [Modified] Use worker's JSON
+                f' --parse_atoms_with_zero_occupancy {self.config.inversefold.parse_atoms_with_zero_occupancy}'
             )
             
             # 10. Run subprocess

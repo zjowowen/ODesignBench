@@ -158,6 +158,7 @@ class ReFold:
     def run(self, action: str, **kwargs) -> dict[str, Any]:
         dispatch = {
             "run_alphafold3": self.run_alphafold3,
+            "run_alphafold3_single_gpu": self.run_alphafold3_single_gpu,
             "run_chai1": self.run_chai1,
             "chai1": self.run_chai1,
             "run_esmfold": self.run_esmfold,
@@ -203,6 +204,52 @@ class ReFold:
         return self._make_result(
             stage="refold.run_alphafold3",
             outputs={"input_json": str(input_json), "output_dir": str(output_dir)},
+            details={"num_cif_files": len(cif_files), **dialect_fix},
+        )
+
+    def run_alphafold3_single_gpu(self, input_json: str, output_dir: str, gpu: str) -> dict[str, Any]:
+        """
+        Run AlphaFold3 on a single GPU. Used for multi-GPU parallel execution.
+        
+        Args:
+            input_json: Path to AF3 input JSON file (subset of jobs)
+            output_dir: Output directory for this GPU
+            gpu: GPU ID (e.g., "0", "1", "2")
+        """
+        output_dir = str(Path(output_dir).resolve())
+        input_json = str(Path(input_json).resolve())
+        dialect_fix = self._normalize_af3_input_dialect(input_json)
+        
+        # Use single GPU
+        cmd = [
+            "bash", 
+            f"{self.config.refold.af3_exec}", 
+            f"{self.config.refold.exp_name}", 
+            f"{input_json}", 
+            f"{output_dir}", 
+            gpu,  # Single GPU ID
+            f"{self.config.refold.run_data_pipeline}", 
+            f"{self.config.refold.cache_dir}"
+        ]
+        
+        print(f"[refold] Running AF3 on GPU {gpu}: {' '.join(cmd)}")
+        subprocess.run(cmd, check=True)
+        
+        # Verify output was produced
+        cif_files = list(Path(output_dir).rglob("*.cif"))
+        if not cif_files:
+            log_dir = Path(output_dir).parent / "af3_log"
+            log_hint = f" Check {log_dir}/ for AF3 GPU logs." if log_dir.exists() else ""
+            raise FileNotFoundError(
+                f"AF3 completed but no CIF files in {output_dir}.{log_hint} "
+                "Possible causes: (1) Container writes to a different path; "
+                "(2) AF3 failed - check af3_log/*.log; "
+                "(3) templatesPath in af3_input.json - ensure backbone PDB paths are accessible inside container."
+            )
+        
+        return self._make_result(
+            stage="refold.run_alphafold3_single_gpu",
+            outputs={"input_json": str(input_json), "output_dir": str(output_dir), "gpu": gpu},
             details={"num_cif_files": len(cif_files), **dialect_fix},
         )
 

@@ -220,16 +220,16 @@ class MotifBenchEvaluator:
     ) -> Path:
         """
         Generate motif_info.csv from scaffold_info.csv.
-        
+
         This uses internal script to convert scaffold_info to motif_info format.
         """
         import subprocess
         import sys
-        
+
         scaffold_info_path = Path(scaffold_info_path)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         motif_pdb_path = self.motif_pdbs_dir / f"{motif_name}.pdb"
         if not motif_pdb_path.exists():
             raise FileNotFoundError(
@@ -237,13 +237,13 @@ class MotifBenchEvaluator:
                 f"Please ensure motif PDB files are available in: {self.motif_pdbs_dir}\n"
                 f"Or configure 'motif_pdbs_dir' in your config file."
             )
-        
+
         motif_info_path = output_dir / "motif_info.csv"
-        
+
         script_path = self._scripts_dir / "write_motifInfo_from_scaffoldInfo.py"
         if not script_path.exists():
             raise FileNotFoundError(f"Script not found: {script_path}")
-        
+
         python_path = None
         if hasattr(self.config, 'motif_scaffolding') and hasattr(self.config.motif_scaffolding, 'python_path'):
             python_path = self.config.motif_scaffolding.python_path
@@ -255,7 +255,7 @@ class MotifBenchEvaluator:
             python_path = None
         if not python_path:
             python_path = sys.executable
-        
+
         cmd = [
             python_path,
             str(script_path),
@@ -263,13 +263,13 @@ class MotifBenchEvaluator:
             str(motif_pdb_path),
             str(motif_info_path)
         ]
-        
+
         self.logger.info(f"Generating motif_info.csv for {motif_name}")
         subprocess.run(cmd, check=True, capture_output=True, text=True)
-        
+
         if not motif_info_path.exists():
             raise RuntimeError(f"Failed to generate motif_info.csv")
-        
+
         return motif_info_path
 
     def _extract_motif_segments_from_contig(self, contig: str) -> List[tuple[str, int, int]]:
@@ -312,6 +312,63 @@ class MotifBenchEvaluator:
                 motif_segments.append((chain, start, end))
         return motif_segments
 
+    def _parse_contig_with_scaffold_lengths(self, contig: str, split_char: str = "/") -> List[tuple]:
+        """
+        Parse contig string to extract scaffold lengths and motif segments.
+        
+        For contig like "52/A1-21/52", returns:
+        - (52,) for scaffold length
+        - ('motif', 'A', 1, 21) for motif segment
+        - (52,) for scaffold length
+        
+        For contig like "31/A1-15/32/B1-15/32", returns:
+        - (31,) for scaffold length
+        - ('motif', 'A', 1, 15) for motif segment
+        - (32,) for scaffold length
+        - ('motif', 'B', 1, 15) for motif segment
+        - (32,) for scaffold length
+        
+        Note: A range like "0-100" as a scaffold token means scaffold length is 100.
+        Also supports ";" as split_char for formats like "0-100;A1-21;0-100".
+        """
+        segments = []
+        for part in str(contig).split(split_char):
+            token = part.strip()
+            if not token:
+                continue
+            if token[0].isalpha():
+                # Motif segment - parse chain and residue range
+                for motif_piece in token.split(","):
+                    piece = motif_piece.strip()
+                    if not piece:
+                        continue
+                    chain = piece[0]
+                    residue_part = piece[1:]
+                    if "-" in residue_part:
+                        start_text, end_text = residue_part.split("-", 1)
+                        start, end = int(start_text), int(end_text)
+                    else:
+                        start = end = int(residue_part)
+                    segments.append(('motif', chain, start, end))
+            else:
+                # Scaffold length token - could be a single number or range
+                if "-" in token:
+                    # Range format: "0-100" means scaffold of length 100
+                    parts = token.split("-")
+                    if len(parts) == 2:
+                        try:
+                            # If both parts are numbers, it's a range (use end value as length)
+                            scaffold_len = int(parts[1])
+                        except ValueError:
+                            # If not pure numbers, try parsing as before
+                            scaffold_len = int(parts[0]) + int(parts[1])
+                    else:
+                        scaffold_len = int(parts[0])
+                else:
+                    scaffold_len = int(token)
+                segments.append(('scaffold', scaffold_len))
+        return segments
+
     def _build_reference_and_sample_motif_contigs(
         self,
         contig: str,
@@ -320,13 +377,17 @@ class MotifBenchEvaluator:
         """
         Build aligned motif-only contigs for reference motif PDB and sampled structure.
 
-        The sampled contig uses chains from `contig` (design-space chains), while
-        the reference contig maps motif segments by segment index onto `segment_order`
-        (motif-PDB chains).
+        For contig "52/A1-21/52":
+        - reference_contig: "A1-21" (motif PDB residue numbering)
+        - sample_contig: "A53-73" (scaffold PDB residue numbering, offset by scaffold lengths)
+        
+        For contig "31/A1-15/32/B1-15/32":
+        - reference_contig: "A1-15/B1-15"
+        - sample_contig: "A32-46/B78-92"
         """
-        motif_segments = self._extract_motif_segments_from_contig(contig)
-        if not motif_segments:
-            raise ValueError(f"No motif segments found in contig: '{contig}'")
+        parsed_segments = self._parse_contig_with_scaffold_lengths(contig, split_char=';' if ';' in contig else '/')
+        if not parsed_segments:
+            raise ValueError(f"No segments found in contig: '{contig}'")
 
         reference_chain_order = [
             chain_id.strip()
@@ -334,12 +395,40 @@ class MotifBenchEvaluator:
             if chain_id and chain_id.strip()
         ]
 
-        sample_parts: List[str] = []
-        reference_parts: List[str] = []
-        for idx, (sample_chain, start, end) in enumerate(motif_segments):
-            ref_chain = reference_chain_order[idx] if idx < len(reference_chain_order) else sample_chain
-            sample_parts.append(f"{sample_chain}{start}" if start == end else f"{sample_chain}{start}-{end}")
-            reference_parts.append(f"{ref_chain}{start}" if start == end else f"{ref_chain}{start}-{end}")
+        # Calculate cumulative offset for motif positions in sample structure
+        motif_idx = 0  # Index into motif segments (for reference chain ordering)
+        sample_offset = 0  # Running total of scaffold lengths
+        reference_parts = []
+        sample_parts = []
+
+        for seg in parsed_segments:
+            if seg[0] == 'scaffold':
+                # Add scaffold length to running offset
+                sample_offset += seg[1]
+            else:
+                # Motif segment
+                chain, ref_start, ref_end = seg[1], seg[2], seg[3]
+                
+                # Calculate motif positions in sample structure (offset by scaffold lengths)
+                sample_start = sample_offset + ref_start
+                sample_end = sample_offset + ref_end
+                
+                # Get reference chain from segment_order
+                ref_chain = reference_chain_order[motif_idx] if motif_idx < len(reference_chain_order) else chain
+                
+                # Format reference contig (using motif PDB residue numbering)
+                if ref_start == ref_end:
+                    reference_parts.append(f"{ref_chain}{ref_start}")
+                else:
+                    reference_parts.append(f"{ref_chain}{ref_start}-{ref_end}")
+                
+                # Format sample contig (using scaffold PDB residue numbering)
+                if sample_start == sample_end:
+                    sample_parts.append(f"{chain}{sample_start}")
+                else:
+                    sample_parts.append(f"{chain}{sample_start}-{sample_end}")
+                
+                motif_idx += 1
 
         return "/".join(reference_parts), "/".join(sample_parts)
     
