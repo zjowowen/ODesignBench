@@ -19,6 +19,46 @@ class RMSDCalculator():
               PocketBench    compute_pocket_rmsd + compute_protein_backbone_rmsd \
               "
               )
+
+    @staticmethod
+    def _load_structure(path: str):
+        if path.endswith('.cif'):
+            return pdbx.get_structure(pdbx.CIFFile.read(path), model=1)
+        return pdb.get_structure(pdb.PDBFile.read(path), model=1)
+
+    @staticmethod
+    def _normalize_chain_ids(chain_ids: Optional[Sequence[str]]) -> Optional[Set[str]]:
+        if chain_ids is None:
+            return None
+        normalized = {
+            str(c).strip()
+            for c in chain_ids
+            if str(c).strip() and str(c).strip().lower() != "nan"
+        }
+        return normalized or None
+
+    @staticmethod
+    def _ca_coord_map(arr, chain_ids: Optional[Sequence[str]] = None) -> Dict[Tuple[str, int], np.ndarray]:
+        chain_set = RMSDCalculator._normalize_chain_ids(chain_ids)
+        mask = (arr.atom_name == "CA") & (~arr.hetero)
+        if chain_set is not None:
+            mask &= np.isin(arr.chain_id, list(chain_set))
+        out: Dict[Tuple[str, int], np.ndarray] = {}
+        if np.sum(mask) == 0:
+            return out
+        for chain_id, res_id, coord in zip(arr.chain_id[mask], arr.res_id[mask], arr.coord[mask]):
+            key = (str(chain_id), int(res_id))
+            if key not in out:
+                out[key] = coord
+        return out
+
+    @staticmethod
+    def _coords_from_res_id_map(coord_map: Dict[Tuple[str, int], np.ndarray]) -> Dict[int, np.ndarray]:
+        by_res_id: Dict[int, np.ndarray] = {}
+        for (_, res_id), coord in coord_map.items():
+            if res_id not in by_res_id:
+                by_res_id[res_id] = coord
+        return by_res_id
     
     @staticmethod
     def compute_C4_rmsd(pred: str, refold: str):
@@ -81,30 +121,11 @@ class RMSDCalculator():
     
     @staticmethod
     def compute_protein_ca_rmsd(pred: str, refold: str):
-        if pred.endswith('.cif'):
-            pred_structure = pdbx.get_structure(pdbx.CIFFile.read(pred), model=1)
-        else:
-            pred_structure = pdb.get_structure(pdb.PDBFile.read(pred), model=1)
-        
-        if refold.endswith('.cif'):
-            refold_structure = pdbx.get_structure(pdbx.CIFFile.read(refold), model=1)
-        else:
-            refold_structure = pdb.get_structure(pdb.PDBFile.read(refold), model=1)
+        pred_structure = RMSDCalculator._load_structure(pred)
+        refold_structure = RMSDCalculator._load_structure(refold)
 
-        def _ca_coord_map(arr) -> Dict[Tuple[str, int], np.ndarray]:
-            mask = (arr.atom_name == "CA") & (~arr.hetero)
-            out: Dict[Tuple[str, int], np.ndarray] = {}
-            if np.sum(mask) == 0:
-                return out
-            for chain_id, res_id, coord in zip(arr.chain_id[mask], arr.res_id[mask], arr.coord[mask]):
-                key = (str(chain_id), int(res_id))
-                # If duplicates exist, keep the first.
-                if key not in out:
-                    out[key] = coord
-            return out
-
-        pred_map = _ca_coord_map(pred_structure)
-        ref_map = _ca_coord_map(refold_structure)
+        pred_map = RMSDCalculator._ca_coord_map(pred_structure)
+        ref_map = RMSDCalculator._ca_coord_map(refold_structure)
         common = sorted(set(pred_map.keys()) & set(ref_map.keys()))
         if len(common) < 3:
             return float("nan")
@@ -128,30 +149,11 @@ class RMSDCalculator():
         if not chain_set:
             return float("nan")
 
-        if pred.endswith('.cif'):
-            pred_structure = pdbx.get_structure(pdbx.CIFFile.read(pred), model=1)
-        else:
-            pred_structure = pdb.get_structure(pdb.PDBFile.read(pred), model=1)
-        
-        if refold.endswith('.cif'):
-            refold_structure = pdbx.get_structure(pdbx.CIFFile.read(refold), model=1)
-        else:
-            refold_structure = pdb.get_structure(pdb.PDBFile.read(refold), model=1)
+        pred_structure = RMSDCalculator._load_structure(pred)
+        refold_structure = RMSDCalculator._load_structure(refold)
 
-        def _ca_coord_map(arr) -> Dict[Tuple[str, int], np.ndarray]:
-            mask = (arr.atom_name == "CA") & (~arr.hetero) & (np.isin(arr.chain_id, list(chain_set)))
-            out: Dict[Tuple[str, int], np.ndarray] = {}
-            if np.sum(mask) == 0:
-                return out
-            for chain_id, res_id, coord in zip(arr.chain_id[mask], arr.res_id[mask], arr.coord[mask]):
-                key = (str(chain_id), int(res_id))
-                # If duplicates exist, keep the first.
-                if key not in out:
-                    out[key] = coord
-            return out
-
-        pred_map = _ca_coord_map(pred_structure)
-        ref_map = _ca_coord_map(refold_structure)
+        pred_map = RMSDCalculator._ca_coord_map(pred_structure, chain_ids=list(chain_set))
+        ref_map = RMSDCalculator._ca_coord_map(refold_structure, chain_ids=list(chain_set))
         common = sorted(set(pred_map.keys()) & set(ref_map.keys()))
         if len(common) < 3:
             return float("nan")
@@ -160,6 +162,45 @@ class RMSDCalculator():
         ref_coords = np.stack([ref_map[k] for k in common], axis=0)
         pred_align, _ = struc.superimpose(ref_coords, pred_coords)
         return float(struc.rmsd(ref_coords, pred_align))
+
+    @staticmethod
+    def compute_protein_ca_rmsd_unbound_vs_bound_design(
+        unbound: str,
+        bound_complex: str,
+        bound_chain_ids: Sequence[str],
+    ):
+        """
+        Compare the AF3-predicted unbound binder monomer against the binder chain
+        extracted from the AF3-predicted target+binder complex.
+
+        Chain IDs may differ between the monomer and complex outputs, so the primary
+        matching key is residue index within the selected chain(s), with an ordered
+        fallback when residue IDs are unavailable/misaligned.
+        """
+        unbound_structure = RMSDCalculator._load_structure(unbound)
+        bound_structure = RMSDCalculator._load_structure(bound_complex)
+
+        unbound_map = RMSDCalculator._ca_coord_map(unbound_structure)
+        bound_map = RMSDCalculator._ca_coord_map(bound_structure, chain_ids=bound_chain_ids)
+        if len(unbound_map) < 3 or len(bound_map) < 3:
+            return float("nan")
+
+        unbound_by_res = RMSDCalculator._coords_from_res_id_map(unbound_map)
+        bound_by_res = RMSDCalculator._coords_from_res_id_map(bound_map)
+        common_res_ids = sorted(set(unbound_by_res.keys()) & set(bound_by_res.keys()))
+        if len(common_res_ids) >= 3:
+            unbound_coords = np.stack([unbound_by_res[k] for k in common_res_ids], axis=0)
+            bound_coords = np.stack([bound_by_res[k] for k in common_res_ids], axis=0)
+            unbound_align, _ = struc.superimpose(bound_coords, unbound_coords)
+            return float(struc.rmsd(bound_coords, unbound_align))
+
+        unbound_coords = np.stack(list(unbound_map.values()), axis=0)
+        bound_coords = np.stack(list(bound_map.values()), axis=0)
+        if len(unbound_coords) != len(bound_coords) or len(unbound_coords) < 3:
+            return float("nan")
+
+        unbound_align, _ = struc.superimpose(bound_coords, unbound_coords)
+        return float(struc.rmsd(bound_coords, unbound_align))
 
     @staticmethod
     def compute_atomic_motif_rmsd(pred: str, refold: str, trb: str):

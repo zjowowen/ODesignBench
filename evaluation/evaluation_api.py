@@ -801,6 +801,40 @@ class Evaluation():
                     return str(candidate)
             return str(parents[0] / f"{sample_name}{suffix}")
 
+        def _collect_latest_af3_outputs(root_dir: Path) -> tuple[list[Path], dict[str, int]]:
+            all_refold_paths = list(root_dir.rglob("*_model.cif"))
+            sample_to_path: dict[str, Path] = {}
+            duplicate_counts: dict[str, int] = defaultdict(int)
+            for p in all_refold_paths:
+                sample_name = _normalize_af3_sample_name(p.stem)
+                if sample_name in sample_to_path:
+                    duplicate_counts[sample_name] += 1
+                    chosen = sample_to_path[sample_name]
+                    chosen_depth = len(chosen.relative_to(root_dir).parts)
+                    cand_depth = len(p.relative_to(root_dir).parts)
+                    if cand_depth < chosen_depth or (cand_depth == chosen_depth and p.stat().st_mtime > chosen.stat().st_mtime):
+                        sample_to_path[sample_name] = p
+                else:
+                    sample_to_path[sample_name] = p
+            return list(sample_to_path.values()), duplicate_counts
+
+        complex_refold_root = Path(os.path.join(pipeline_dir, "refold", "af3_out"))
+        unbound_refold_root = Path(os.path.join(pipeline_dir, "refold", "af3_unbound_out"))
+        unbound_refold_map: dict[str, Path] = {}
+        if unbound_refold_root.exists():
+            unbound_refold_paths, unbound_duplicate_counts = _collect_latest_af3_outputs(unbound_refold_root)
+            unbound_refold_map = {
+                _normalize_af3_sample_name(path.stem): path
+                for path in unbound_refold_paths
+            }
+            if unbound_duplicate_counts:
+                print(
+                    f"Detected duplicate unbound AF3 outputs for {len(unbound_duplicate_counts)} samples "
+                    f"({sum(unbound_duplicate_counts.values())} extra files). Keeping newest per sample."
+                )
+        else:
+            print(f"Warning: Unbound AF3 output directory not found: {unbound_refold_root}")
+
         def process_metrics_worker(refold_path: Path):
             try:
                 # sample_name from CIF filename (e.g. h3-5-3_model.cif -> h3-5-3), not parent dir,
@@ -865,6 +899,25 @@ class Evaluation():
                 except Exception:
                     ca_rmsd = np.inf
 
+                try:
+                    if design_chain_id is None or design_chain_id.lower() == "nan":
+                        raise ValueError("design_chain not found in pbp_info")
+                    unbound_refold_path = unbound_refold_map.get(sample_name)
+                    if unbound_refold_path is None:
+                        raise FileNotFoundError(
+                            f"Unbound AF3 output not found for sample '{sample_name}' under {unbound_refold_root}"
+                        )
+                    ca_rmsd_bound_unbound = RMSDCalculator.compute_protein_ca_rmsd_unbound_vs_bound_design(
+                        unbound=str(unbound_refold_path),
+                        bound_complex=str(refold_path),
+                        bound_chain_ids=[design_chain_id],
+                    )
+                    if np.isnan(ca_rmsd_bound_unbound):
+                        raise ValueError("insufficient common CA residues between unbound and bound design structures")
+                except Exception as e:
+                    ca_rmsd_bound_unbound = np.nan
+                    print(f"Warning: Failed bound/unbound RMSD for {sample_name}: {e}")
+
                 # Chain IDs (Ab: H+L, Ag: A,B,...) from CDR CSV if available
                 h_chain_id = None
                 l_chain_id = None
@@ -903,6 +956,7 @@ class Evaluation():
                     # RMSD (design-chain and complex views)
                     'ca_rmsd': ca_rmsd,
                     'ca_rmsd_complex': ca_rmsd_complex,
+                    'ca_rmsd_bound_unbound': ca_rmsd_bound_unbound,
                     'plddt': plddt,
                     'ipae': ipae,
                     'min_ipae': min_ipae,
@@ -915,23 +969,7 @@ class Evaluation():
                 return None, None
         
         raw_data = defaultdict(dict)
-        all_refold_paths = list(Path(os.path.join(pipeline_dir, "refold", "af3_out")).rglob("*_model.cif"))
-        # AF3 can leave both canonical and timestamped rerun folders for the same sample.
-        # Evaluate each sample once by keeping the most recently modified CIF.
-        sample_to_path: dict[str, Path] = {}
-        duplicate_counts: dict[str, int] = defaultdict(int)
-        for p in all_refold_paths:
-            sample_name = _normalize_af3_sample_name(p.stem)
-            if sample_name in sample_to_path:
-                duplicate_counts[sample_name] += 1
-                chosen = sample_to_path[sample_name]
-                chosen_depth = len(chosen.relative_to(Path(os.path.join(pipeline_dir, "refold", "af3_out"))).parts)
-                cand_depth = len(p.relative_to(Path(os.path.join(pipeline_dir, "refold", "af3_out"))).parts)
-                if cand_depth < chosen_depth or (cand_depth == chosen_depth and p.stat().st_mtime > chosen.stat().st_mtime):
-                    sample_to_path[sample_name] = p
-            else:
-                sample_to_path[sample_name] = p
-        all_refold_paths = list(sample_to_path.values())
+        all_refold_paths, duplicate_counts = _collect_latest_af3_outputs(complex_refold_root)
         print(f"{len(all_refold_paths)} unique files were found for evaluation.")
         if duplicate_counts:
             print(
@@ -956,7 +994,7 @@ class Evaluation():
             & (df.get('plddt', np.nan) > 0.8)
             & (df.get('ca_rmsd_complex', np.nan) < 2.5)
         )
-        kept_columns = ['ca_rmsd', 'ca_rmsd_complex', 'plddt', 'ipae', 'min_ipae', 'iptm', 'success']
+        kept_columns = ['ca_rmsd', 'ca_rmsd_complex', 'ca_rmsd_bound_unbound', 'plddt', 'ipae', 'min_ipae', 'iptm', 'success']
         df = df[[c for c in kept_columns if c in df.columns]]
         df.to_csv(output_csv, index=True)
         print(f"metrics computation completed and saved to {output_csv}.")

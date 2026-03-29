@@ -15,6 +15,26 @@ import biotite.structure as struc
 import biotite.structure.io as io
 import sys
 
+def _replace_unk_with_ala(pdb_path: Path) -> bool:
+    """
+    Replace UNK residues with ALA in a PDB file.
+    UNK (Unknown) residues cause issues with ProDy's select('protein') function,
+    which doesn't recognize UNK as a valid amino acid.
+    
+    Returns True if replacements were made, False otherwise.
+    """
+    content = pdb_path.read_text()
+    if 'UNK' not in content:
+        return False
+    
+    # Replace UNK with ALA
+    new_content = content.replace('UNK', 'ALA')
+    
+    # Write back
+    pdb_path.write_text(new_content)
+    return True
+
+
 def _setup_distributed(local_rank, world_size):
     """Sets up the distributed environment for a worker process."""
     # Set master address and port (torchrun does this automatically)
@@ -263,10 +283,14 @@ class InverseFold:
                     pdb_file = pdb.PDBFile()
                     pdb_file.set_structure(atom_array)
                     pdb_file.write(str(pdb_dest))
+                    # Replace UNK with ALA for compatibility with ProDy's protein selection
+                    _replace_unk_with_ala(pdb_dest)
                     return pdb_dest
                 except Exception as e:
                     print(f"Warning: Failed to convert CIF {struct_path.name} to PDB: {e}, skipping")
                     return None
+            # Replace UNK with ALA for PDB files as well
+            _replace_unk_with_ala(struct_path)
             return struct_path
 
         struct_paths = list(input_dir.rglob("*.pdb")) + list(input_dir.rglob("*.cif"))
@@ -467,6 +491,17 @@ class InverseFold:
             from .motif_scaffolding_utils import load_scaffold_info_csv
             scaffold_info_df = load_scaffold_info_csv(scaffold_info_csv)
             print(f"Loaded motif scaffold info for {len(scaffold_info_df)} structures")
+
+        # Replace UNK with ALA before processing to ensure compatibility with ProDy
+        # UNK residues cause ProDy's select('protein') to miss these positions
+        unk_replaced_count = 0
+        for pdb_path in input_dir.rglob("*.pdb"):
+            # Replace UNK residues in-place for compatibility with downstream tools
+            if _replace_unk_with_ala(pdb_path):
+                unk_replaced_count += 1
+                print(f"  Replaced UNK with ALA in {pdb_path.name}")
+        if unk_replaced_count > 0:
+            print(f"Total UNK->ALA replacements: {unk_replaced_count} files")
 
         for pdb_path in input_dir.rglob("*.pdb"):
             if pbp_info_df is not None:

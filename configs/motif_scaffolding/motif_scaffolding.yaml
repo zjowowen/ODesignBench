@@ -5,7 +5,10 @@
 # Python executable path for subprocesses (null = use current Python)
 python_path: null
 
-# Foldseek database path (required for novelty calculation)
+# Foldseek configuration (required for diversity and novelty metrics)
+# Install foldseek: conda install -c conda-forge -c bioconda foldseek
+# Download PDB database: foldseek databases PDB <output_dir>/pdb <output_dir>/tmp
+# Set environment variable: export FOLDSEEK_DATABASE=/path/to/pdb_database
 foldseek_database: ${oc.env:FOLDSEEK_DATABASE,tools/foldseek/databases/pdb}
 
 # GPU ID for evaluation (optional, use GPU if specified)

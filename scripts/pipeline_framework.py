@@ -480,6 +480,38 @@ def _prepare_refold_af3_pbp_target_msa(ctx: PipelineContext) -> None:
     )
 
 
+def _prepare_refold_af3_pbp_dual(ctx: PipelineContext) -> None:
+    pbp_info_df = ctx.runtime.get("pbp_info_df", None)
+    if pbp_info_df is None:
+        pbp_info_csv = _resolve_metadata_csv(
+            ctx,
+            cfg_key="pbp_info_csv",
+            preferred_names=["pbp_info.csv"],
+            csv_label="PBP info CSV",
+        )
+        from inversefold.pbp_csv_utils import load_pbp_info_csv
+        pbp_info_df = load_pbp_info_csv(pbp_info_csv)
+        ctx.runtime["pbp_info_csv"] = pbp_info_csv
+        ctx.runtime["pbp_info_df"] = pbp_info_df
+
+    complex_prepare = ctx.refold_model.run(
+        action="make_af3_json_pbp_target_msa",
+        backbone_dir=str(ctx.pipeline_dir / "inverse_fold" / "backbones"),
+        output_path=str(ctx.pipeline_dir / "refold" / "af3_inputs"),
+        pbp_info_df=pbp_info_df,
+    )
+    unbound_prepare = ctx.refold_model.run(
+        action="make_af3_json_pbp_design_only",
+        backbone_dir=str(ctx.pipeline_dir / "inverse_fold" / "backbones"),
+        output_path=str(ctx.pipeline_dir / "refold" / "af3_unbound_inputs"),
+        pbp_info_df=pbp_info_df,
+    )
+    ctx.runtime["refold_prepare"] = {
+        "complex": complex_prepare,
+        "unbound": unbound_prepare,
+    }
+
+
 def _prepare_refold_af3_from_inverse_fold(ctx: PipelineContext) -> None:
     ctx.runtime["refold_prepare"] = ctx.refold_model.run(
         action="make_af3_json_multi_process",
@@ -488,15 +520,18 @@ def _prepare_refold_af3_from_inverse_fold(ctx: PipelineContext) -> None:
     )
 
 
-def _run_refold_af3(ctx: PipelineContext) -> None:
+def _run_refold_af3_for_paths(
+    ctx: PipelineContext,
+    *,
+    input_json_path: Path,
+    output_base_dir: Path,
+) -> dict:
     """
     Run AlphaFold3 refold stage. Supports multi-GPU parallel execution.
 
     When multiple GPUs are available, splits the AF3 input JSON into N parts
     (one per GPU) and runs N parallel AF3 instances, each on a single GPU.
     """
-    input_json_path = ctx.pipeline_dir / "refold" / "af3_inputs"
-    output_base_dir = ctx.pipeline_dir / "refold" / "af3_out"
     gpu_list = ctx.gpu_list
 
     # Load AF3 input JSON
@@ -511,12 +546,11 @@ def _run_refold_af3(ctx: PipelineContext) -> None:
     
     if num_gpus <= 1 or num_jobs <= 1:
         # Single GPU or single job: run directly
-        ctx.runtime["refold"] = ctx.refold_model.run(
+        return ctx.refold_model.run(
             action="run_alphafold3",
             input_json=str(input_json_path),
             output_dir=str(output_base_dir),
         )
-        return
     
     # Multi-GPU parallel execution: split jobs across GPUs
     print(f"[refold] Multi-GPU mode: {num_gpus} GPUs, {num_jobs} jobs, distributing...")
@@ -591,15 +625,51 @@ def _run_refold_af3(ctx: PipelineContext) -> None:
             if dest.exists():
                 dest.unlink()
             shutil.move(str(cif_file), str(dest))
+            sample_name = cif_file.stem.replace("_model", "")
+            for suffix in ["_confidences.json", "_summary_confidences.json"]:
+                sidecar = cif_file.parent / f"{sample_name}{suffix}"
+                if sidecar.exists():
+                    sidecar_dest = output_base_dir / sidecar.name
+                    if sidecar_dest.exists():
+                        sidecar_dest.unlink()
+                    shutil.move(str(sidecar), str(sidecar_dest))
     
-    ctx.runtime["refold"] = {
+    result = {
         "stage": "refold.run_alphafold3_multi_gpu",
+        "success": True,
+        "outputs": {"output_dir": str(output_base_dir)},
         "num_gpus": num_gpus,
         "num_jobs": num_jobs,
         "results": results,
         "details": {"total_cif_files": total_cif_files},
     }
     print(f"[refold] Multi-GPU AF3 completed: {total_cif_files} CIF files in {output_base_dir}")
+    return result
+
+
+def _run_refold_af3(ctx: PipelineContext) -> None:
+    ctx.runtime["refold"] = _run_refold_af3_for_paths(
+        ctx,
+        input_json_path=ctx.pipeline_dir / "refold" / "af3_inputs",
+        output_base_dir=ctx.pipeline_dir / "refold" / "af3_out",
+    )
+
+
+def _run_refold_af3_pbp_dual(ctx: PipelineContext) -> None:
+    complex_run = _run_refold_af3_for_paths(
+        ctx,
+        input_json_path=ctx.pipeline_dir / "refold" / "af3_inputs",
+        output_base_dir=ctx.pipeline_dir / "refold" / "af3_out",
+    )
+    unbound_run = _run_refold_af3_for_paths(
+        ctx,
+        input_json_path=ctx.pipeline_dir / "refold" / "af3_unbound_inputs",
+        output_base_dir=ctx.pipeline_dir / "refold" / "af3_unbound_out",
+    )
+    ctx.runtime["refold"] = {
+        "complex": complex_run,
+        "unbound": unbound_run,
+    }
 
 
 def _prepare_refold_chai1(ctx: PipelineContext) -> None:
@@ -883,8 +953,8 @@ TASK_SPECS: dict[str, TaskSpec] = {
     "pbp": TaskSpec(
         preprocess_stage=_preprocess_protein,
         inversefold_stage=_inversefold_pbp,
-        refold_prepare_stage=_prepare_refold_af3_pbp_target_msa,
-        refold_stage=_run_refold_af3,
+        refold_prepare_stage=_prepare_refold_af3_pbp_dual,
+        refold_stage=_run_refold_af3_pbp_dual,
         evaluation_plugins=[_plugin_pbp_eval],
     ),
     "lbp": TaskSpec(

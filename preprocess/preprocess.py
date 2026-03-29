@@ -172,8 +172,20 @@ class Preprocess():
         - All other residues = fixed (b_factor=1.0)
         
         If no trb file is found or use_trb=False, preserves existing b_factor or defaults to 1.0.
+        
+        Note: UNK (Unknown) residues are automatically replaced with ALA to ensure compatibility
+        with ProDy's protein selection in downstream inverse-folding tools (ProteinMPNN/LigandMPNN).
+        ProDy's select('protein') does not recognize UNK, which can cause residue count mismatches.
         """
         atom_array = read_structure(struct_path)
+        
+        # Replace UNK residues with ALA for compatibility with ProDy and MPNN tools
+        # UNK is used by MotifBench as placeholder for scaffold positions
+        if hasattr(atom_array, 'res_name'):
+            unk_mask = atom_array.res_name == 'UNK'
+            if np.any(unk_mask):
+                atom_array.res_name[unk_mask] = 'ALA'
+                print(f"  Replaced {np.sum(unk_mask)} UNK residues with ALA in {Path(struct_path).name}")
         
         if not use_trb:
             # If b_factor doesn't exist or is all zeros, set default to 1.0 (all fixed)

@@ -1,2 +1,8 @@
+# Foldseek configuration for diversity and novelty metrics
+# Required for MotifBench evaluation
+# Download foldseek from: https://github.com/steineggerlab/foldseek
+# Install: conda install -c conda-forge -c bioconda foldseek
+# Download PDB database: foldseek databases PDB <output_dir>/pdb <output_dir>/tmp
+
 foldseek_bin: ${oc.env:FOLDSEEK_BIN,tools/foldseek/bin/foldseek}
 foldseek_database: ${oc.env:FOLDSEEK_DATABASE,tools/foldseek/databases/pdb}

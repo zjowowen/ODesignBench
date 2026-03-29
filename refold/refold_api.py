@@ -168,6 +168,7 @@ class ReFold:
             "make_af3_json_multi_process": self.make_af3_json_multi_process,
             "prepare_af3_json": self.make_af3_json_multi_process,
             "make_af3_json_pbp_target_msa": self.make_af3_json_pbp_target_msa,
+            "make_af3_json_pbp_design_only": self.make_af3_json_pbp_design_only,
             "make_chai1_fasta_multi_process": self.make_chai1_fasta_multi_process,
             "prepare_chai1_fasta": self.make_chai1_fasta_multi_process,
         }
@@ -980,6 +981,134 @@ class ReFold:
                 "num_backbones": len(backbone_path_list),
                 "pbp_msa_root": str(pbp_msa_root),
             },
+        )
+
+    @staticmethod
+    def _build_af3_single_protein_input(
+        name: str,
+        sequence: str,
+        *,
+        dialect: str = "alphafoldserver",
+        run_data_pipeline: bool = False,
+        chain_id: str = "A",
+    ) -> dict[str, Any]:
+        is_server = dialect == "alphafoldserver"
+        single_input = {
+            "name": str(name),
+            "sequences": [],
+            "modelSeeds": [1],
+            "dialect": dialect,
+            "version": 1,
+        }
+        if is_server:
+            protein_chain = {"sequence": str(sequence)}
+            if not run_data_pipeline:
+                protein_chain["unpairedMsa"] = ""
+                protein_chain["pairedMsa"] = ""
+                protein_chain["templates"] = []
+            single_input["sequences"].append({"proteinChain": protein_chain})
+        else:
+            protein = {"sequence": str(sequence), "id": [str(chain_id)]}
+            if not run_data_pipeline:
+                protein["unpairedMsa"] = ""
+                protein["pairedMsa"] = ""
+                protein["templates"] = []
+            single_input["sequences"].append({"protein": protein})
+        return single_input
+
+    @staticmethod
+    def _extract_protein_sequence_from_chain(chain_atom_array) -> str:
+        try:
+            return str(struc.to_sequence(chain_atom_array, allow_hetero=True)[0][0])
+        except BadStructureError:
+            standard_aa = set(struc_info.amino_acid_names())
+            res_names = chain_atom_array.res_name.copy()
+            non_std = ~np.isin(res_names, list(standard_aa))
+            if non_std.any():
+                res_names[non_std] = "GLY"
+                chain_copy = chain_atom_array.copy()
+                chain_copy.res_name = res_names
+                return str(struc.to_sequence(chain_copy, allow_hetero=True)[0][0])
+            raise
+
+    def make_af3_json_pbp_design_only(
+        self,
+        backbone_dir: str,
+        output_path: str,
+        pbp_info_df: object,
+    ) -> dict[str, Any]:
+        """
+        Build AF3 input JSON for the unbound PBP metric:
+        - provide only the inverse-folded binder/design sequence
+        - exclude target chain entirely
+        - exclude all MSAs/templates
+        """
+        if self.config.refold.run_data_pipeline:
+            raise ValueError(
+                "PBP design-only mode requires refold.run_data_pipeline=false, "
+                "otherwise AF3 will run its own MSA/template pipeline and violate the requirement."
+            )
+
+        from inversefold.pbp_csv_utils import match_pdb_to_pbp_info
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        backbone_path_list = list(Path(backbone_dir).glob("*.pdb"))
+        if len(backbone_path_list) == 0:
+            print(f"Warning: No backbone PDB files found in {backbone_dir}, try cif format.")
+            backbone_path_list = list(Path(backbone_dir).glob("*.cif"))
+        if len(backbone_path_list) == 0:
+            raise FileNotFoundError(f"No backbones found under {backbone_dir}")
+
+        dialect = str(getattr(self.config.refold, "af3_input_dialect", "alphafoldserver"))
+
+        def _build_one(backbone_path: Path) -> dict[str, Any]:
+            pbp_info = match_pdb_to_pbp_info(backbone_path, pbp_info_df) if pbp_info_df is not None else None
+            if pbp_info_df is not None and pbp_info is None:
+                raise ValueError(
+                    f"No PBP CSV info found for backbone '{backbone_path.name}'. "
+                    "Ensure pbp_info.csv design_name matches formatted designs and backbone-derived names."
+                )
+
+            design_chain_id = pbp_info["design_chain"] if pbp_info is not None else "A"
+            if backbone_path.suffix.lower() == ".cif":
+                atom_array = pdbx.get_structure(pdbx.CIFFile.read(backbone_path), model=1)
+            else:
+                atom_array = pdb.get_structure(pdb.PDBFile.read(backbone_path), model=1)
+
+            chain_atom_array = atom_array[(atom_array.chain_id == design_chain_id) & (~atom_array.hetero)]
+            if len(chain_atom_array) == 0:
+                protein_chain_ids = sorted(set(map(str, atom_array.chain_id[(~atom_array.hetero)].tolist())))
+                raise ValueError(
+                    f"Design chain '{design_chain_id}' not found in backbone '{backbone_path.name}'. "
+                    f"Available protein chains: {protein_chain_ids}"
+                )
+
+            sequence = self._extract_protein_sequence_from_chain(chain_atom_array)
+            if not sequence:
+                raise ValueError(
+                    f"Failed to extract design-chain sequence for '{backbone_path.name}' "
+                    f"(design_chain='{design_chain_id}')"
+                )
+
+            return self._build_af3_single_protein_input(
+                name=backbone_path.stem,
+                sequence=sequence,
+                dialect=dialect,
+                run_data_pipeline=bool(self.config.refold.run_data_pipeline),
+                chain_id=str(design_chain_id),
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.refold.num_workers) as executor:
+            futures = [executor.submit(_build_one, bp) for bp in backbone_path_list]
+            af3_input_list = [future.result() for future in concurrent.futures.as_completed(futures)]
+
+        with open(output_path, "w") as f:
+            json.dump(af3_input_list, f, indent=4)
+
+        return self._make_result(
+            stage="refold.make_af3_json_pbp_design_only",
+            outputs={"output_json": str(output_path)},
+            details={"num_backbones": len(backbone_path_list)},
         )
 
     @staticmethod

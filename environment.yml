@@ -3,6 +3,7 @@ channels:
   - pytorch
   - nvidia
   - conda-forge
+  - bioconda
   - defaults
 dependencies:
   # Core Python & C++ dependencies
@@ -10,6 +11,9 @@ dependencies:
   - setuptools
   - openmm=8.0
   - pdbfixer
+
+  # Structural biology tools
+  - foldseek
 
   # Core deep learning stack (CUDA 12.1 for Protenix compatibility)
   - pytorch>=2.3.1

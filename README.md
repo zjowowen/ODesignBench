@@ -21,13 +21,13 @@ git clone https://github.com/OTeam-AI4S/ODesignBench.git
 cd ODesignBench
 ```
 
-2. Create the Conda environment:
+1. Create the Conda environment:
 
 ```bash
 conda env create -f environment.yml
 ```
 
-3. Activate the environment:
+1. Activate the environment:
 
 ```bash
 conda activate designbench
@@ -78,12 +78,12 @@ python scripts/run_pbp_pipeline.py \
 
 To run ESMFold for refolding, you need to download the ESMFold model weights from Hugging Face. The scripts expect the weights to be located in `refold/esmfold/weights`.
 
-You can download them using the huggingface python module:
+Download using the Python API (recommended):
 
 ```bash
 # Make sure you are in the ODesignBench directory
 mkdir -p refold/esmfold/weights
-python -m huggingface_hub.cli.hf download facebook/esmfold_v1 --local-dir refold/esmfold/weights
+python -c "from huggingface_hub import snapshot_download; snapshot_download('facebook/esmfold_v1', local_dir='refold/esmfold/weights')"
 ```
 
 Or manually download the weights from [Hugging Face](https://huggingface.co/facebook/esmfold_v1/tree/main).
@@ -115,6 +115,7 @@ aria2c -x 16 -s 16 -d $CHAI_DOWNLOADS_DIR/esm -o traced_sdpa_esm2_t36_3B_UR50D_f
 ```
 
 ### Method 2: Pre-download via Python script
+
 Run the following Python script:
 
 ```python
@@ -168,17 +169,23 @@ python3 scripts/run_ame_pipeline.py design_dir=examples/tip_atom_scaffolding/ gp
 Some benchmark tasks use `refold=af3` which runs AlphaFold3 inside the Docker wrapper `refold/run_af3.sh`.
 
 ### Download required artifacts
+
 Follow the official AlphaFold3 instructions in the upstream repo to download:
+
 1. AF3 model parameters (see: [Obtaining model parameters](https://github.com/google-deepmind/alphafold3#obtaining-model-parameters))
-2. AF3 public databases (see the database download instructions in the upstream AlphaFold3 repo: https://github.com/google-deepmind/alphafold3).
+2. AF3 public databases (see the database download instructions in the upstream AlphaFold3 repo: [https://github.com/google-deepmind/alphafold3](https://github.com/google-deepmind/alphafold3)).
 
 ### Directory layout expected by `refold/run_af3.sh`
+
 The wrapper expects:
+
 - `$AF3_BASE/model` -> mounted to `/root/models` inside the container
 - `$AF3_PUBLIC_DB` -> mounted to `/root/public_databases` inside the container
 
 ### Configure environment variables
+
 Set these before running any pipeline that uses AF3 refolding:
+
 ```bash
 export AF3_BASE=/path/to/af3              # must contain: $AF3_BASE/models
 export AF3_PUBLIC_DB=/path/to/public_databases
@@ -189,6 +196,7 @@ export AF3_DOCKER_IMAGE=alphafold3
 **Note on PBP target MSA injection:** PBP tasks inject pre-computed MSA for the target chain via a runtime patch (`AF3_DIALECT_PATCH=true`, default). The assets are expected at `/assets`. Set `AF3_DIALECT_PATCH=false` to disable the patch.
 
 ### Run
+
 After exporting the variables above, run the normal pipeline commands (e.g. `scripts/run_pbp_pipeline.py` with `refold=af3`).
 
 ## Benchmark Content
@@ -267,6 +275,60 @@ MotifBench evaluates whether generated scaffolds preserve motif geometry while r
 - Refold: ESMFold
 - Evaluation: motif RMSD/scaffold RMSD, novelty, diversity
 
+#### Foldseek Installation (Required for MotifBench Evaluation)
+
+MotifBench uses Foldseek for diversity clustering and novelty evaluation. Follow these steps to install:
+
+**1. Install Foldseek via conda:**
+
+```bash
+conda install -c conda-forge -c bioconda foldseek
+```
+
+**2. Download the Foldseek PDB database:**
+
+```bash
+export FOLDSEEK_DATABASE=/path/to/foldseek_pdb_database
+mkdir -p $FOLDSEEK_DATABASE
+cd $FOLDSEEK_DATABASE
+foldseek databases PDB pdb tmp
+```
+
+> Note: The database download may take 30-60 minutes depending on your connection speed. The PDB database is approximately 60GB uncompressed.
+
+**3. Set environment variables:**
+
+```bash
+# Add to your ~/.bashrc or ~/.zshrc for persistence
+export FOLDSEEK_DATABASE=/path/to/foldseek_pdb_database
+export FOLDSEEK_BIN=$(which foldseek)  # or explicitly: /path/to/conda/bin/foldseek
+```
+
+**4. Verify installation:**
+
+```bash
+foldseek --version
+foldseek createdb --help
+```
+
+**5. Running MotifBench evaluation with Foldseek:**
+
+```bash
+python scripts/run_motif_scaffolding_pipeline.py \
+  design_dir=/path/to/motif_scaffolds \
+  gpus=0 \
+  motif_scaffolding.foldseek_database=$FOLDSEEK_DATABASE/pdb
+```
+
+Or via environment variable:
+
+```bash
+export FOLDSEEK_DATABASE=/path/to/foldseek_pdb_database
+python scripts/run_motif_scaffolding_pipeline.py \
+  design_dir=/path/to/motif_scaffolds \
+  gpus=0
+```
+
 Minimal run command:
 
 ```bash
@@ -338,6 +400,7 @@ The unified pipeline consists of five main stages: `preprocess`, `inversefold`, 
 You can skip specific stages by setting them to `false` via Hydra overrides using the `+unified.steps.<stage_name>=false` syntax. This is particularly useful if you only want to re-run evaluation or skip a time-consuming step that has already completed.
 
 **Example: Skip preprocessing and inverse folding**
+
 ```bash
 python scripts/run_ame_pipeline.py design_dir=examples/tip_atom_scaffolding/ gpus=0 root=results/examples/tip_atom_scaffolding \
   +unified.steps.preprocess=false \
@@ -345,6 +408,7 @@ python scripts/run_ame_pipeline.py design_dir=examples/tip_atom_scaffolding/ gpu
 ```
 
 **Example: Run ONLY evaluation (skip all other steps)**
+
 ```bash
 python scripts/run_ame_pipeline.py design_dir=examples/tip_atom_scaffolding/ gpus=0 root=results/examples/tip_atom_scaffolding \
   +unified.steps.preprocess=false \
