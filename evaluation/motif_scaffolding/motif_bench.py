@@ -645,8 +645,7 @@ class MotifBenchEvaluator:
                 else:
                     sc_rmsd = None
                 
-                # Success threshold: motif RMSD < 2.0 Å
-                success = motif_rmsd < 2.0
+                success = (motif_rmsd < 1.0) and (sc_rmsd < 2.0)
                 
                 results.append({
                     'sample_num': sample_num,
