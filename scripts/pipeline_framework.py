@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from hydra.utils import get_original_cwd
 
@@ -26,7 +26,6 @@ from hydra.utils import get_original_cwd
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from preprocess.preprocess import Preprocess
-from inversefold.inversefold_api import InverseFold
 from refold.refold_api import ReFold
 from evaluation.evaluation_api import Evaluation
 from evaluation.motif_scaffolding.motif_scaffolding_evaluation import _discover_motifs, _prepare_input_dir
@@ -45,7 +44,7 @@ class PipelineContext:
     origin_cwd: str
     gpu_list: list[str]
     preprocess_model: Preprocess
-    inversefold_model: InverseFold
+    inversefold_model: Optional[Any]
     refold_model: ReFold
     evaluation_model: Evaluation
     runtime: dict
@@ -372,8 +371,47 @@ def _preprocess_cif(ctx: PipelineContext) -> None:
     )
 
 
+def _require_inversefold_model(ctx: PipelineContext) -> Any:
+    if ctx.inversefold_model is None:
+        raise RuntimeError(
+            "inversefold model is not initialized for this task. "
+            "Use a task spec with inversefold stage disabled/passthrough only."
+        )
+    return ctx.inversefold_model
+
+
+def _inversefold_passthrough_formatted_designs(ctx: PipelineContext) -> None:
+    """
+    Nucleic-acid eval path: use ODesign outputs directly.
+    No sequence redesign is performed in ODesignBench.
+    """
+    formatted_dir = ctx.pipeline_dir / "formatted_designs"
+    inverse_fold_dir = ctx.pipeline_dir / "inverse_fold"
+    inverse_fold_dir.mkdir(parents=True, exist_ok=True)
+
+    backbone_paths = sorted(formatted_dir.glob("*.cif")) + sorted(formatted_dir.glob("*.pdb"))
+    if not backbone_paths:
+        raise FileNotFoundError(
+            f"No formatted structures found under {formatted_dir}. "
+            "Expected at least one *.cif or *.pdb from preprocess stage."
+        )
+
+    copied = 0
+    for src in backbone_paths:
+        dst = inverse_fold_dir / src.name
+        shutil.copy2(src, dst)
+        copied += 1
+
+    ctx.runtime["inversefold"] = {
+        "success": True,
+        "stage": "inversefold.passthrough_from_formatted_designs",
+        "outputs": {"output_dir": str(inverse_fold_dir)},
+        "details": {"num_inputs": len(backbone_paths), "num_copied": copied},
+    }
+
+
 def _inversefold_proteinmpnn(ctx: PipelineContext) -> None:
-    ctx.runtime["inversefold"] = ctx.inversefold_model.run(
+    ctx.runtime["inversefold"] = _require_inversefold_model(ctx).run(
         action="proteinmpnn_distributed",
         input_dir=ctx.pipeline_dir / "formatted_designs",
         output_dir=str(ctx.pipeline_dir / "inverse_fold"),
@@ -396,7 +434,7 @@ def _inversefold_pbp(ctx: PipelineContext) -> None:
     ctx.runtime["pbp_info_csv"] = pbp_info_csv
     ctx.runtime["pbp_info_df"] = pbp_info_df
 
-    ctx.runtime["inversefold"] = ctx.inversefold_model.run(
+    ctx.runtime["inversefold"] = _require_inversefold_model(ctx).run(
         action="proteinmpnn_distributed",
         input_dir=ctx.pipeline_dir / "formatted_designs",
         output_dir=str(ctx.pipeline_dir / "inverse_fold"),
@@ -408,7 +446,7 @@ def _inversefold_pbp(ctx: PipelineContext) -> None:
 
 
 def _inversefold_ligandmpnn(ctx: PipelineContext) -> None:
-    ctx.runtime["inversefold"] = ctx.inversefold_model.run(
+    ctx.runtime["inversefold"] = _require_inversefold_model(ctx).run(
         action="ligandmpnn_distributed",
         input_dir=ctx.pipeline_dir / "formatted_designs",
         output_dir=str(ctx.pipeline_dir / "inverse_fold"),
@@ -418,7 +456,7 @@ def _inversefold_ligandmpnn(ctx: PipelineContext) -> None:
 
 
 def _inversefold_odesign_to_inverse_fold(ctx: PipelineContext) -> None:
-    ctx.runtime["inversefold"] = ctx.inversefold_model.run(
+    ctx.runtime["inversefold"] = _require_inversefold_model(ctx).run(
         action="odesignmpnn",
         input_root=ctx.pipeline_dir / "formatted_designs",
         inverse_fold_root=ctx.pipeline_dir / "inverse_fold",
@@ -427,7 +465,7 @@ def _inversefold_odesign_to_inverse_fold(ctx: PipelineContext) -> None:
 
 def _inversefold_odesign_to_inversefold(ctx: PipelineContext) -> None:
     # Keep compatibility with existing PBL output directory naming.
-    ctx.runtime["inversefold"] = ctx.inversefold_model.run(
+    ctx.runtime["inversefold"] = _require_inversefold_model(ctx).run(
         action="odesignmpnn",
         input_root=ctx.pipeline_dir / "formatted_designs",
         inverse_fold_root=ctx.pipeline_dir / "inversefold",
@@ -730,7 +768,7 @@ def _preprocess_ame(ctx: PipelineContext) -> None:
 
 def _inversefold_ame(ctx: PipelineContext) -> None:
     ame_csv_path = _get_or_resolve_ame_csv(ctx)
-    ctx.runtime["inversefold"] = ctx.inversefold_model.run(
+    ctx.runtime["inversefold"] = _require_inversefold_model(ctx).run(
         action="ligandmpnn_distributed",
         input_dir=ctx.pipeline_dir / "formatted_designs",
         output_dir=str(ctx.pipeline_dir / "inverse_fold"),
@@ -906,7 +944,7 @@ def _inversefold_motif_scaffolding(ctx: PipelineContext) -> None:
             metadata_path = Path(str(metadata_file))
             if metadata_path.exists():
                 run_kwargs["scaffold_info_csv"] = str(metadata_path)
-        results[motif_name] = ctx.inversefold_model.run(
+        results[motif_name] = _require_inversefold_model(ctx).run(
             **run_kwargs,
         )
         item["inverse_fold_dir"] = str(inverse_fold_dir)
@@ -971,20 +1009,16 @@ def _generate_motif_scaffolding_summaries(ctx: PipelineContext) -> None:
         python_path = sys.executable
 
     test_cases_path = None
-    possible_test_cases_paths = [
-        Path(__file__).resolve().parent.parent / "Motif_Benchmark" / "MotifBench" / "test_cases.csv",
-        Path(__file__).resolve().parent.parent
-        / "evaluation"
-        / "motif_scaffolding"
-        / "resources"
-        / "test_cases.csv",
-        Path(__file__).resolve().parents[2] / "MotifBench" / "test_cases.csv",
-        Path(__file__).resolve().parents[3] / "MotifBench" / "test_cases.csv",
-    ]
-    for path in possible_test_cases_paths:
-        if path.exists():
-            test_cases_path = path
-            break
+    if hasattr(motif_cfg, "get"):
+        configured_test_cases = motif_cfg.get("test_cases_csv", None)
+    else:
+        configured_test_cases = getattr(motif_cfg, "test_cases_csv", None)
+    if configured_test_cases:
+        candidate = Path(str(configured_test_cases))
+        if candidate.exists():
+            test_cases_path = candidate
+        else:
+            print(f"[unified] Warning: motif_scaffolding.test_cases_csv not found: {candidate}")
 
     cmd = [str(python_path), str(script_path), str(ctx.pipeline_dir)]
     if test_cases_path is not None:
@@ -1048,7 +1082,7 @@ TASK_SPECS: dict[str, TaskSpec] = {
     ),
     "nuc": TaskSpec(
         preprocess_stage=_preprocess_cif,
-        inversefold_stage=_inversefold_odesign_to_inverse_fold,
+        inversefold_stage=_inversefold_passthrough_formatted_designs,
         refold_prepare_stage=_prepare_refold_af3_from_inverse_fold,
         refold_stage=_run_refold_af3,
         evaluation_plugins=[_plugin_nuc_eval],
@@ -1096,6 +1130,7 @@ def run_unified_pipeline(cfg: object, task_name: str) -> PipelineContext:
     if task_name not in TASK_SPECS:
         known = ", ".join(sorted(TASK_SPECS.keys()))
         raise ValueError(f"Unknown task_name '{task_name}'. Supported: {known}")
+    spec = TASK_SPECS[task_name]
 
     gpu_list = _gpus_to_list(getattr(cfg, "gpus"))
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_list)
@@ -1108,6 +1143,12 @@ def run_unified_pipeline(cfg: object, task_name: str) -> PipelineContext:
     if not os.path.exists(design_dir):
         raise FileNotFoundError(f"design_dir not found: {design_dir}")
 
+    inversefold_model = None
+    if spec.inversefold_stage not in (None, _inversefold_passthrough_formatted_designs):
+        from inversefold.inversefold_api import InverseFold
+
+        inversefold_model = InverseFold(cfg)
+
     ctx = PipelineContext(
         cfg=cfg,
         task_name=task_name,
@@ -1116,12 +1157,11 @@ def run_unified_pipeline(cfg: object, task_name: str) -> PipelineContext:
         origin_cwd=origin_cwd,
         gpu_list=gpu_list,
         preprocess_model=Preprocess(cfg),
-        inversefold_model=InverseFold(cfg),
+        inversefold_model=inversefold_model,
         refold_model=ReFold(cfg),
         evaluation_model=Evaluation(cfg),
         runtime={},
     )
-    spec = TASK_SPECS[task_name]
 
     print("=" * 80)
     print(f"[unified] Task: {task_name}")

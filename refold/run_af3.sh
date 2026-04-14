@@ -23,6 +23,7 @@ num_diffusion_samples="${7:-1}"  # Default to 1 if not provided
 # AF3 installation directories (override via env vars)
 AF3_BASE="${AF3_BASE:-/path/to/af3}"
 AF3_PUBLIC_DB="${AF3_PUBLIC_DB:-/path/to/public_databases}"
+AF3_MODEL_DIR="${AF3_MODEL_DIR:-}"
 
 # AF3 Docker image name (override via env var if your image tag differs)
 AF3_DOCKER_IMAGE="${AF3_DOCKER_IMAGE:-alphafold3}"
@@ -44,8 +45,22 @@ gpus_space_separated=${gpus//,/ }
 # Build docker volume mounts
 # - /root/af_output: some containers use this default output path
 # - /app/alphafold/log: capture AF3 logs for debugging (see af3_log/ after run)
+if [[ -z "$AF3_MODEL_DIR" ]]; then
+    if [[ -d "$AF3_BASE/models" ]]; then
+        AF3_MODEL_DIR="$AF3_BASE/models"
+    elif [[ -d "$AF3_BASE/model" ]]; then
+        AF3_MODEL_DIR="$AF3_BASE/model"
+    fi
+fi
+if [[ -z "$AF3_MODEL_DIR" || ! -d "$AF3_MODEL_DIR" ]]; then
+    echo "ERROR: Cannot find AF3 model directory." >&2
+    echo "  Tried AF3_MODEL_DIR='$AF3_MODEL_DIR', AF3_BASE/models, and AF3_BASE/model." >&2
+    echo "  Set AF3_MODEL_DIR directly or set AF3_BASE correctly." >&2
+    exit 1
+fi
+
 BIND_MOUNTS=(
-    -v "$AF3_BASE/models:/root/models"
+    -v "$AF3_MODEL_DIR:/root/models"
     -v "$AF3_PUBLIC_DB:/root/public_databases"
     -v "$output_path:$output_path"
     -v "$output_path:/root/af_output"
@@ -54,11 +69,6 @@ BIND_MOUNTS=(
     # Mount assets so MSA paths are accessible inside the container.
     -v "$AF3_ASSETS:/assets"
 )
-
-if [[ "$AF3_BASE" == "/path/to/af3" || ! -d "$AF3_BASE/models" ]]; then
-    echo "ERROR: Set AF3_BASE to your AlphaFold3 installation directory (must contain models/ for docker volume mounts)." >&2
-    exit 1
-fi
 
 if [[ "$AF3_PUBLIC_DB" == "/path/to/public_databases" || ! -d "$AF3_PUBLIC_DB" ]]; then
     echo "ERROR: Set AF3_PUBLIC_DB to your AlphaFold3 public_databases directory." >&2

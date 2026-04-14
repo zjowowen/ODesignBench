@@ -860,9 +860,9 @@ class ReFold:
         pbp_msa_root = pbp_msa_root.resolve()
         if not pbp_msa_root.exists():
             raise FileNotFoundError(f"PBP MSA root not found: {pbp_msa_root}")
-        pbp_msa_filename = str(getattr(self.config.refold, "pbp_target_msa_filename", "colafold.a3m")).strip()
+        pbp_msa_filename = str(getattr(self.config.refold, "pbp_target_msa_filename", "colabfold.a3m")).strip()
         if not pbp_msa_filename:
-            pbp_msa_filename = "colafold.a3m"
+            pbp_msa_filename = "colabfold.a3m"
 
         # Prefer the canonical target id list from target_config.csv when available.
         target_ids: list[str] = []
