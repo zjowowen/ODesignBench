@@ -246,6 +246,7 @@ Minimal run command:
 ```bash
 python scripts/run_nuc_pipeline.py \
   design_dir=/path/to/nuc_designs \
+  refold.run_data_pipeline=true \
   gpus=0
 ```
 
@@ -256,9 +257,12 @@ Example:
 ```bash
 python3 scripts/run_nuc_pipeline.py \
   design_dir=examples/nuc/rna \
+  refold.run_data_pipeline=true \
   gpus=0 \
   root=results/examples/nuc
 ```
+
+For RNA without precomputed MSA in AF3 input JSON, set `refold.run_data_pipeline=true` to let AF3 run MSA/template search during refold. Keep global default `run_data_pipeline=false` for other tasks.
 
 ### Atomic Motif Scaffolding / Enzyme Design (AME)
 
@@ -490,7 +494,7 @@ python3 scripts/run_pbl_pipeline.py design_dir=examples/protein_binding_ligand/ 
 ### 5. Nucleic Acid (RNA example)
 
 ```bash
-python3 scripts/run_nuc_pipeline.py design_dir=examples/nuc/rna/ gpus=0 root=results/examples/nuc
+python3 scripts/run_nuc_pipeline.py design_dir=examples/nuc/rna/ refold.run_data_pipeline=true gpus=0 root=results/examples/nuc
 ```
 
 ## Repository Layout

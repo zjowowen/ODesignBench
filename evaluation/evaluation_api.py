@@ -1373,11 +1373,27 @@ class Evaluation():
         print(f"metrics computation completed and saved to {output_csv}.")
     
     def run_nuc_evaluation(self, pipeline_dir: str, output_csv: str):
+        def _infer_inverse_fold_name(refold_path: Path) -> str:
+            """
+            Map AF3 output CIF name to inverse_fold CIF stem.
+            Handles both:
+              - <name>_model.cif
+              - <name>_seed-1_sample-0_model.cif
+            """
+            stem = refold_path.stem
+            if stem.endswith("_model"):
+                stem = stem[: -len("_model")]
+            # Remove AF3 per-seed suffix, keep the original design name.
+            if "_seed-" in stem and "_sample-" in stem:
+                stem = stem.split("_seed-", 1)[0]
+            return stem
         
         def process_metrics_worker(refold_path: Path):
             try:
-                sample_name = refold_path.parent.name
-                inverse_fold_path = os.path.join(pipeline_dir, "inverse_fold", f"{sample_name}.cif")
+                sample_name = _infer_inverse_fold_name(refold_path)
+                inverse_fold_path = os.path.join(
+                    pipeline_dir, "inverse_fold", f"{sample_name}.cif"
+                )
                 rmsd = RMSDCalculator.compute_C4_rmsd(pred=str(refold_path), refold=inverse_fold_path)
                 tmscore = USalign.compute_tmscore(pred=inverse_fold_path, refold=str(refold_path))
                 result_data = {
@@ -1405,6 +1421,10 @@ class Evaluation():
                     raw_data[sample_name] = result_data
 
         df = pd.DataFrame.from_dict(raw_data, orient='index')
+        if df.empty:
+            print("Warning: No valid NUC evaluation rows were produced; writing empty CSV and skipping clustering.")
+            df.to_csv(output_csv, index=True)
+            return
 
         op_map = {
             '>': operator.gt,
@@ -1419,25 +1439,25 @@ class Evaluation():
                 print(f"Warning: Metric '{metric_name}' in config does not exist in DataFrame, skipping.")
                 continue
 
-        try:
-            # 2.1 Parse condition string, e.g., ">/0.45"
-            op_str, val_str = threshold.split('/')
-            threshold_value = float(val_str)
-            
-            # 2.2 Get corresponding operator function, e.g., operator.gt
-            op_func = op_map[op_str]
-            
-            # 2.3 Apply operator to entire column (vectorized operation)
-            # Example: op_func(df_metrics['metric_1'], 0.45)
-            # This returns a boolean Series indicating which rows satisfy the condition
-            condition_series = op_func(df[metric_name], threshold_value)
-            all_condition_series.append(condition_series)
+            try:
+                # 2.1 Parse condition string, e.g., ">/0.45"
+                op_str, val_str = threshold.split('/')
+                threshold_value = float(val_str)
+                
+                # 2.2 Get corresponding operator function, e.g., operator.gt
+                op_func = op_map[op_str]
+                
+                # 2.3 Apply operator to entire column (vectorized operation)
+                # Example: op_func(df_metrics['metric_1'], 0.45)
+                # This returns a boolean Series indicating which rows satisfy the condition
+                condition_series = op_func(df[metric_name], threshold_value)
+                all_condition_series.append(condition_series)
 
-        except (ValueError, KeyError, IndexError) as e:
-            print(f"Error: Cannot parse condition '{threshold}' (metric: {metric_name}). Please check format. Error: {e}")
-            # If a condition parsing fails, we can either make all samples fail
-            # or skip this condition. Here we create an all-False Series
-            all_condition_series.append(pd.Series(False, index=df.index))
+            except (ValueError, KeyError, IndexError) as e:
+                print(f"Error: Cannot parse condition '{threshold}' (metric: {metric_name}). Please check format. Error: {e}")
+                # If a condition parsing fails, we can either make all samples fail
+                # or skip this condition. Here we create an all-False Series
+                all_condition_series.append(pd.Series(False, index=df.index))
         
         if not all_condition_series:
             print("No valid thresholds applied.")
@@ -1467,7 +1487,10 @@ class Evaluation():
         for case, backbones in success_backbone_list.items():
             with open(os.path.join(pipeline_dir, "cluster", "success", f"{case}_success_backbones.list"), 'w') as f:
                 f.write('\n'.join(backbones))
-        
+        if not success_backbone_list:
+            print("Warning: No successful NUC backbones after thresholding; skip qTMclust metrics.")
+            return
+
         USalign.compute_qTMclust_metrics(
             success_dir=os.path.join(pipeline_dir, "cluster", "success"),
             gen_dir=os.path.join(pipeline_dir, "formatted_designs"),
