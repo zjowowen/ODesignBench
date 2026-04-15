@@ -11,4 +11,4 @@ cache_dir:
 unpaired_msa_cache: 
 paired_msa_cache: 
 template_cache: 
-pbp_target_msa_filename: colafold.a3m
+pbp_target_msa_filename: colabfold.a3m

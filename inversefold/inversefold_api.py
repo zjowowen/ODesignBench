@@ -15,6 +15,35 @@ import biotite.structure as struc
 import biotite.structure.io as io
 import sys
 
+def _collect_unk_residues(pdb_path: Path) -> set[str]:
+    """
+    Collect residue IDs (e.g. "A123") whose residue name is UNK in a PDB file.
+    """
+    unk_residues: set[str] = set()
+    with pdb_path.open("r") as f:
+        for line in f:
+            if not (line.startswith("ATOM") or line.startswith("HETATM")):
+                continue
+            if line[17:20].strip() != "UNK":
+                continue
+            chain_id = line[21].strip()
+            if not chain_id:
+                continue
+            try:
+                res_id = int(line[22:26].strip())
+            except ValueError:
+                continue
+            unk_residues.add(f"{chain_id}{res_id}")
+    return unk_residues
+
+
+def _remove_residues_from_fixed_list(fixed_residues: List[str], residues_to_remove: set[str]) -> List[str]:
+    """Remove residue IDs from a fixed-residue list while preserving order."""
+    if not residues_to_remove:
+        return fixed_residues
+    return [r for r in fixed_residues if r not in residues_to_remove]
+
+
 def _replace_unk_with_ala(pdb_path: Path) -> bool:
     """
     Replace UNK residues with ALA in a PDB file.
@@ -468,6 +497,8 @@ class InverseFold:
         pbp_info_df: Optional[Any] = None,
         scaffold_info_csv: Optional[str] = None,
         scaffold_info_df: Optional[Any] = None,
+        motif_info_csv: Optional[str] = None,
+        motif_info_df: Optional[Any] = None,
     ) -> Dict[str, Any]:
         os.makedirs(output_dir, exist_ok=True)
         checkpoint_path = Path(str(self.config.inversefold.checkpoint_path))
@@ -491,11 +522,31 @@ class InverseFold:
             from .motif_scaffolding_utils import load_scaffold_info_csv
             scaffold_info_df = load_scaffold_info_csv(scaffold_info_csv)
             print(f"Loaded motif scaffold info for {len(scaffold_info_df)} structures")
+        if motif_info_df is None and motif_info_csv is not None:
+            from .motif_scaffolding_utils import load_motif_info_csv
+            motif_info_df = load_motif_info_csv(motif_info_csv)
+            print(f"Loaded motif_info for {len(motif_info_df)} structures")
+        elif motif_info_df is None and scaffold_info_csv is not None:
+            from .motif_scaffolding_utils import build_motif_info_rows
+            motif_name = input_dir.name
+            motif_pdbs_dir = None
+            if hasattr(self.config, "motif_scaffolding") and hasattr(self.config.motif_scaffolding, "motif_pdbs_dir"):
+                motif_pdbs_dir = Path(str(self.config.motif_scaffolding.motif_pdbs_dir))
+            if motif_pdbs_dir is None:
+                motif_pdbs_dir = Path(__file__).resolve().parent.parent / "assets" / "motif_scaffolding"
+            motif_pdb_path = motif_pdbs_dir / f"{motif_name}.pdb"
+            if motif_pdb_path.exists():
+                motif_info_df = build_motif_info_rows(scaffold_info_csv, motif_name, motif_pdb_path)
+                print(f"Built motif_info in memory for {len(motif_info_df)} structures")
 
         # Replace UNK with ALA before processing to ensure compatibility with ProDy
         # UNK residues cause ProDy's select('protein') to miss these positions
         unk_replaced_count = 0
+        unk_residues_by_pdb: Dict[str, set[str]] = {}
         for pdb_path in input_dir.rglob("*.pdb"):
+            unk_residues = _collect_unk_residues(pdb_path)
+            if unk_residues:
+                unk_residues_by_pdb[str(pdb_path)] = unk_residues
             # Replace UNK residues in-place for compatibility with downstream tools
             if _replace_unk_with_ala(pdb_path):
                 unk_replaced_count += 1
@@ -517,13 +568,20 @@ class InverseFold:
                     design_chain=pbp_info["design_chain"],
                     target_chain=pbp_info["target_chain"],
                 )
+                fixed_residues = _remove_residues_from_fixed_list(
+                    fixed_residues,
+                    unk_residues_by_pdb.get(str(pdb_path), set()),
+                )
                 ligandmpnn_multi_input[str(pdb_path)] = " ".join(fixed_residues)
             elif scaffold_info_df is not None:
                 from .motif_scaffolding_utils import (
+                    calculate_redesigned_residues_from_motif_info,
                     match_pdb_to_scaffold_info,
+                    match_pdb_to_motif_info,
                     calculate_fixed_residues_from_motif_placements,
                 )
                 scaffold_row = match_pdb_to_scaffold_info(pdb_path, scaffold_info_df)
+                motif_row = match_pdb_to_motif_info(pdb_path, motif_info_df) if motif_info_df is not None else None
                 if scaffold_row is None:
                     print(
                         f"Warning: No scaffold_info row found for '{pdb_path.name}', "
@@ -534,6 +592,18 @@ class InverseFold:
                         fixed_residues = calculate_fixed_residues_from_motif_placements(
                             pdb_path,
                             scaffold_row
+                        )
+                        if motif_row is not None:
+                            redesign_residues = set(
+                                calculate_redesigned_residues_from_motif_info(pdb_path, motif_row)
+                            )
+                            fixed_residues = _remove_residues_from_fixed_list(
+                                fixed_residues,
+                                redesign_residues,
+                            )
+                        fixed_residues = _remove_residues_from_fixed_list(
+                            fixed_residues,
+                            unk_residues_by_pdb.get(str(pdb_path), set()),
                         )
                         ligandmpnn_multi_input[str(pdb_path)] = " ".join(fixed_residues)
                         continue
@@ -547,8 +617,12 @@ class InverseFold:
             if str(pdb_path) not in ligandmpnn_multi_input:
                 atom_array = pdb.PDBFile.read(pdb_path).get_structure(model=1, extra_fields=['b_factor'])
                 fixed_atom_array = atom_array[atom_array.b_factor != 0.0]
-                fixed_residues = np.unique(np.char.add(fixed_atom_array.chain_id, np.array(fixed_atom_array.res_id, dtype=str)))
-                ligandmpnn_multi_input[str(pdb_path)] = " ".join(fixed_residues.tolist())
+                fixed_residues = np.unique(np.char.add(fixed_atom_array.chain_id, np.array(fixed_atom_array.res_id, dtype=str))).tolist()
+                fixed_residues = _remove_residues_from_fixed_list(
+                    fixed_residues,
+                    unk_residues_by_pdb.get(str(pdb_path), set()),
+                )
+                ligandmpnn_multi_input[str(pdb_path)] = " ".join(fixed_residues)
         json.dump(ligandmpnn_multi_input, open(os.path.join(output_dir, "ligandmpnn_input.json"), 'w'), indent=4)
 
         num_gpus = len(gpu_list)

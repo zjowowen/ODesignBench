@@ -3,8 +3,8 @@ defaults:
   - inversefold: InverseFold
   - metrics: nucleotide_metrics
 
-# design_dir: examples/ODesign/nuc/rna_bb
-design_dir: ${oc.env:DESIGN_DIR,examples/ODesign/nuc/rna_bb}
+# design_dir: examples/nuc/rna
+design_dir: ${oc.env:DESIGN_DIR,examples/nuc/rna}
 root: results
 gpus: 2
 

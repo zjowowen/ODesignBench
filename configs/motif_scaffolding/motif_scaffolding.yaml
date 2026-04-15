@@ -5,6 +5,10 @@
 # Python executable path for subprocesses (null = use current Python)
 python_path: null
 
+# Path to MotifBench test_cases.csv for group mapping in summaries.
+# If null, summary generation will not populate benchmark groups.
+test_cases_csv: null
+
 # Foldseek configuration (required for diversity and novelty metrics)
 # Install foldseek: conda install -c conda-forge -c bioconda foldseek
 # Download PDB database: foldseek databases PDB <output_dir>/pdb <output_dir>/tmp

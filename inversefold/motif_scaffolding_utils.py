@@ -57,6 +57,21 @@ def load_scaffold_info_csv(scaffold_info_csv: str) -> List[Dict[str, str]]:
     return rows
 
 
+def load_motif_info_csv(motif_info_csv: str) -> List[Dict[str, str]]:
+    """Load and validate motif_info.csv metadata."""
+    with open(motif_info_csv, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        columns = set(reader.fieldnames or [])
+    required_columns = {"pdb_name", "sample_num", "contig", "redesign_positions"}
+    missing = required_columns - columns
+    if missing:
+        raise ValueError(
+            f"motif_info.csv is missing required columns: {sorted(missing)}"
+        )
+    return rows
+
+
 def _extract_sample_num_from_filename(struct_path: Path) -> Optional[int]:
     """
     Extract sample number from filenames like:
@@ -85,6 +100,104 @@ def match_pdb_to_scaffold_info(struct_path: Path, scaffold_info_df: Any) -> Opti
         except ValueError:
             continue
     return None
+
+
+def match_pdb_to_motif_info(struct_path: Path, motif_info_df: Any) -> Optional[Any]:
+    """Match a design PDB path to one motif_info row by pdb_name + sample_num."""
+    sample_num = _extract_sample_num_from_filename(struct_path)
+    if sample_num is None:
+        return None
+
+    problem_id = _extract_problem_id_from_pdb_path(struct_path)
+    if problem_id is None:
+        return None
+
+    for row in motif_info_df:
+        try:
+            row_name = str(row.get("pdb_name", "")).strip()
+            row_sample = int(str(row.get("sample_num", "")).strip())
+        except ValueError:
+            continue
+        if row_name == problem_id and row_sample == int(sample_num):
+            return row
+    return None
+
+
+def _read_pdb_residue_data(pdb_file: Path) -> Dict[str, Dict[int, str]]:
+    residue_data: Dict[str, Dict[int, str]] = {}
+    with open(pdb_file, "r") as f:
+        for line in f:
+            if line.startswith(("ATOM", "HETATM")):
+                chain_id = line[21].strip()
+                res_num = int(line[22:26])
+                res_name = line[17:20].strip()
+                residue_data.setdefault(chain_id, {})[res_num] = res_name
+    return residue_data
+
+
+def _get_residue_ranges(res_nums: List[int]) -> List[str]:
+    ranges: List[str] = []
+    sorted_nums = sorted(set(res_nums))
+    if not sorted_nums:
+        return ranges
+    start = prev = sorted_nums[0]
+    for num in sorted_nums[1:]:
+        if num == prev + 1:
+            prev = num
+        else:
+            ranges.append(f"{start}" if start == prev else f"{start}-{prev}")
+            start = prev = num
+    ranges.append(f"{start}" if start == prev else f"{start}-{prev}")
+    return ranges
+
+
+def build_motif_info_rows(
+    scaffold_info_csv: str,
+    motif_name: str,
+    motif_pdb_path: Path,
+) -> List[Dict[str, str]]:
+    """
+    Build motif_info-like rows in memory from scaffold_info.csv and a motif PDB.
+    """
+    residue_data = _read_pdb_residue_data(motif_pdb_path)
+    redesign_positions: List[str] = []
+    for chain_id, residues in residue_data.items():
+        unk_res_nums = [res_num for res_num, res_name in residues.items() if res_name == "UNK"]
+        if unk_res_nums:
+            chain_ranges = _get_residue_ranges(unk_res_nums)
+            redesign_positions.extend(f"{chain_id}{r}" for r in chain_ranges)
+    redesign_positions_str = ";".join(redesign_positions)
+
+    rows: List[Dict[str, str]] = []
+    with open(scaffold_info_csv, "r", newline="") as csv_infile:
+        reader = csv.DictReader(csv_infile)
+        for row in reader:
+            sample_num = str(row["sample_num"]).strip()
+            motif_placements = str(row["motif_placements"]).strip()
+            parts = motif_placements.strip("/").split("/")
+            segment_order = ";".join([part[0] for part in parts if part and part[0].isalpha()])
+
+            contig_parts: List[str] = []
+            for part in parts:
+                if part and part[0].isalpha():
+                    chain = part[0]
+                    res_nums = sorted(residue_data.get(chain, {}).keys())
+                    res_ranges = _get_residue_ranges(res_nums)
+                    range_str = ",".join(f"{chain}{r}" for r in res_ranges)
+                    contig_parts.append(range_str)
+                else:
+                    contig_parts.append(part)
+
+            rows.append(
+                {
+                    "pdb_name": motif_name,
+                    "sample_num": sample_num,
+                    "contig": "/".join(contig_parts),
+                    "redesign_positions": redesign_positions_str,
+                    "segment_order": segment_order,
+                }
+            )
+    return rows
 
 
 def _parse_scaffold_length(token: str) -> int:
@@ -131,6 +244,47 @@ def _parse_motif_token_range(token: str) -> Optional[tuple[int, int]]:
     if end < start:
         raise ValueError(f"Invalid motif range token '{token}': end < start")
     return (start, end)
+
+
+def _parse_contig_segments(contig: str) -> List[tuple[str, int, int]]:
+    segments: List[tuple[str, int, int]] = []
+    for part in str(contig).split("/"):
+        token = part.strip()
+        if not token or not token[0].isalpha():
+            continue
+        for motif_piece in token.split(","):
+            piece = motif_piece.strip()
+            if not piece:
+                continue
+            chain = piece[0]
+            residue_part = piece[1:]
+            if "-" in residue_part:
+                start_text, end_text = residue_part.split("-", 1)
+                start, end = int(start_text), int(end_text)
+            else:
+                start = end = int(residue_part)
+            segments.append((chain, start, end))
+    return segments
+
+
+def _expand_redesign_positions(redesign_positions: str) -> List[str]:
+    output: List[str] = []
+    if not redesign_positions:
+        return output
+    for token in redesign_positions.split(";"):
+        token = token.strip()
+        if not token:
+            continue
+        chain = token[0]
+        residue_part = token[1:]
+        if "-" in residue_part:
+            start_text, end_text = residue_part.split("-", 1)
+            start, end = int(start_text), int(end_text)
+        else:
+            start = end = int(residue_part)
+        for res_id in range(start, end + 1):
+            output.append(f"{chain}{res_id}")
+    return output
 
 
 def _extract_problem_id_from_pdb_path(pdb_path: Path) -> Optional[str]:
@@ -301,6 +455,56 @@ def calculate_fixed_residues_from_motif_placements(
             fixed_residues.append(f"{design_chain}{residue_ids[pos - 1]}")
     
     return fixed_residues
+
+
+def calculate_redesigned_residues_from_motif_info(
+    pdb_path: Path,
+    motif_row: Any,
+) -> List[str]:
+    """
+    Map motif_info.csv redesign_positions onto the designed chain residue IDs.
+    Returns residue IDs like ["A1", "A2", ...] in the design backbone.
+    """
+    contig = str(motif_row.get("contig", "")).strip()
+    redesign_positions = str(motif_row.get("redesign_positions", "")).strip()
+    if not contig or not redesign_positions:
+        return []
+
+    atom_array = pdb.PDBFile.read(str(pdb_path)).get_structure(model=1, extra_fields=["b_factor"])
+    protein_atoms = atom_array[~atom_array.hetero]
+    if len(protein_atoms) == 0:
+        return []
+
+    design_chain = str(protein_atoms.chain_id[0])
+    chain_atoms = protein_atoms[protein_atoms.chain_id == design_chain]
+    residue_ids: List[int] = []
+    for res_id in chain_atoms.res_id:
+        rid = int(res_id)
+        if not residue_ids or residue_ids[-1] != rid:
+            residue_ids.append(rid)
+
+    native_to_seq_idx: Dict[str, int] = {}
+    cursor = 1
+    for part in str(contig).split("/"):
+        token = part.strip()
+        if not token:
+            continue
+        if token[0].isdigit():
+            cursor += _parse_scaffold_length(token)
+            continue
+        for chain, start, end in _parse_contig_segments(token):
+            for native_res in range(start, end + 1):
+                native_to_seq_idx[f"{chain}{native_res}"] = cursor
+                cursor += 1
+
+    redesigned_native = _expand_redesign_positions(redesign_positions)
+    redesigned_residues: List[str] = []
+    for native_key in redesigned_native:
+        seq_idx = native_to_seq_idx.get(native_key)
+        if seq_idx is None or seq_idx < 1 or seq_idx > len(residue_ids):
+            continue
+        redesigned_residues.append(f"{design_chain}{residue_ids[seq_idx - 1]}")
+    return redesigned_residues
 
 
 def read_motif_chain_ranges_from_pdb(motif_pdb_path: Path) -> Dict[str, tuple[int, int]]:

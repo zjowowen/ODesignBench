@@ -181,21 +181,17 @@ class MotifScaffoldingEvaluation:
             if not python_path:
                 python_path = sys.executable
             
-            # Try to find test_cases.csv (optional)
             test_cases_path = None
-            # Check common locations
-            possible_test_cases_paths = [
-                Path(__file__).parent.parent.parent / "Motif_Benchmark" / "MotifBench" / "test_cases.csv",
-                Path(__file__).parent / "resources" / "test_cases.csv",
-                # Common local sibling checkout layout
-                Path(__file__).resolve().parents[4] / "MotifBench" / "test_cases.csv",
-                # If ODesignBench is under .../hzh/ODesignBench, probe .../hzh/MotifBench
-                Path(__file__).resolve().parents[5] / "MotifBench" / "test_cases.csv",
-            ]
-            for path in possible_test_cases_paths:
-                if path.exists():
-                    test_cases_path = path
-                    break
+            if hasattr(self.config, 'motif_scaffolding') and hasattr(self.config.motif_scaffolding, 'test_cases_csv'):
+                configured_test_cases = self.config.motif_scaffolding.test_cases_csv
+                if configured_test_cases:
+                    candidate = Path(str(configured_test_cases))
+                    if candidate.exists():
+                        test_cases_path = candidate
+                    else:
+                        self.logger.warning(
+                            f"Configured motif_scaffolding.test_cases_csv does not exist: {candidate}"
+                        )
             
             cmd = [python_path, str(script_path), str(pipeline_dir)]
             if test_cases_path:
