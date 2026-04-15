@@ -52,7 +52,11 @@ def foldseek_cluster(
             --alignment-type {alignment_type} \
             --tmscore-threshold {tmscore_threshold} \
             --alignment-mode 2 \
+            --db-load-mode 1 \
             -v 0'
+
+    if foldseek_path is not None:
+        cmd = cmd.replace('foldseek', str(foldseek_path))
 
     assist_num = 0
     try:
