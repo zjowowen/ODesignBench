@@ -5,6 +5,7 @@ preprocess/ccd_component/
 
 output/
 results/
+tmp/
 
 venv/
 .env

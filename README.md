@@ -479,6 +479,11 @@ python3 scripts/run_motif_scaffolding_pipeline.py design_dir=examples/motif_scaf
 python3 scripts/run_pbp_pipeline.py design_dir=examples/protein_binding_protein/ gpus=0 root=results/examples/protein_binding_protein
 ```
 
+### 2. Ligand Binding Protein
+
+wget https://files.wwpdb.org/pub/pdb/data/monomers/components.cif.gz to the ccd path 
+gunzip components.cif.gz
+
 ### 3. Atomic Motif Scaffolding / Enzyme Design (AME)
 
 ```bash
