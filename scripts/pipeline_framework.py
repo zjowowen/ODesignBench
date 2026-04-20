@@ -711,10 +711,12 @@ def _run_refold_af3_pbp_dual(ctx: PipelineContext) -> None:
 
 
 def _prepare_refold_chai1(ctx: PipelineContext) -> None:
+    refold_cfg = _get_cfg_value(ctx.cfg, "refold", None)
     ctx.runtime["refold_prepare"] = ctx.refold_model.run(
         action="make_chai1_fasta_from_backbone_dir",
         backbone_dir=str(ctx.pipeline_dir / "inverse_fold" / "backbones"),
         output_dir=str(ctx.pipeline_dir / "refold" / "chai1_inputs"),
+        ccd_path=getattr(refold_cfg, "ccd_component", None) if refold_cfg is not None else None,
         inverse_fold_dir=str(ctx.pipeline_dir / "inverse_fold"),
     )
 

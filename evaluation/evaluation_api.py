@@ -11,6 +11,7 @@ import numpy as np
 from pathlib import Path
 from collections import defaultdict, Counter
 import concurrent.futures
+from biotite.structure.io import pdb, pdbx
 from evaluation.metrics.rmsd import RMSDCalculator
 from evaluation.metrics.confidence import Confidence
 from evaluation.metrics.usalign import USalign
@@ -98,7 +99,16 @@ class Evaluation():
         total_designs = len(design_names)
 
         formatted_designs_dir = os.path.join(pipeline_dir, "formatted_designs")
+
+        def _find_formatted_structure(candidate_name: str) -> str | None:
+            for ext in (".pdb", ".cif"):
+                candidate_path = os.path.join(formatted_designs_dir, f"{candidate_name}{ext}")
+                if os.path.exists(candidate_path):
+                    return candidate_path
+            return None
+
         resolved_design_names: list[str] = []
+        resolved_design_paths: dict[str, str] = {}
         missing_design_names: list[str] = []
         seen_resolved: set[str] = set()
         for design_name in design_names:
@@ -109,12 +119,15 @@ class Evaluation():
                     candidates.append(base_name)
 
             resolved_name = None
+            resolved_path = None
             for cand in candidates:
-                if os.path.exists(os.path.join(formatted_designs_dir, f"{cand}.pdb")):
+                candidate_path = _find_formatted_structure(cand)
+                if candidate_path is not None:
                     resolved_name = cand
+                    resolved_path = candidate_path
                     break
 
-            if resolved_name is None:
+            if resolved_name is None or resolved_path is None:
                 missing_design_names.append(design_name)
                 continue
 
@@ -122,6 +135,7 @@ class Evaluation():
             if resolved_name not in seen_resolved:
                 seen_resolved.add(resolved_name)
                 resolved_design_names.append(resolved_name)
+                resolved_design_paths[resolved_name] = resolved_path
 
         num_designable = len(resolved_design_names)
         designability = (num_designable / total_designs) if total_designs > 0 else 0.0
@@ -165,14 +179,24 @@ class Evaluation():
             )
             os.makedirs(designable_structure_dir, exist_ok=True)
 
-            # Copy designable structure files from formatted_designs to temporary directory
+            # Copy designable structure files from formatted_designs to temporary directory.
+            # FoldSeek expects PDB inputs, so convert CIFs on the fly when needed.
             for design_name in resolved_design_names:
-                src_path = os.path.join(formatted_designs_dir, f"{design_name}.pdb")
+                src_path = resolved_design_paths[design_name]
                 dst_path = os.path.join(designable_structure_dir, f"{design_name}.pdb")
-                if os.path.exists(src_path):
+                if src_path.endswith(".pdb"):
                     shutil.copy2(src_path, dst_path)
+                elif src_path.endswith(".cif"):
+                    try:
+                        cif_file = pdbx.CIFFile.read(src_path)
+                        atom_array = pdbx.get_structure(cif_file, model=1)
+                        pdb_file = pdb.PDBFile()
+                        pdb_file.set_structure(atom_array)
+                        pdb_file.write(dst_path)
+                    except Exception as exc:
+                        print(f"Warning: Failed to convert CIF to PDB for FoldSeek: {src_path}: {exc}")
                 else:
-                    print(f"Warning: Design structure not found for FoldSeek: {src_path}")
+                    print(f"Warning: Unsupported structure format for FoldSeek: {src_path}")
             if missing_design_names:
                 print(
                     "Warning: Some evaluation rows could not be mapped to formatted_designs. "
@@ -648,22 +672,6 @@ class Evaluation():
             if hasattr(self.config.metrics, 'foldseek_database'):
                 foldseek_config['foldseek_database'] = self.config.metrics.foldseek_database
             foldseek_config['verbose'] = getattr(self.config.metrics, 'verbose', False)
-            
-            # Fallback: try to load from foldseek.yaml if not in metrics config
-            if 'foldseek_database' not in foldseek_config or not foldseek_config['foldseek_database']:
-                import yaml
-                foldseek_yaml_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'configs', 'foldseek.yaml')
-                if os.path.exists(foldseek_yaml_path):
-                    try:
-                        with open(foldseek_yaml_path, 'r') as f:
-                            foldseek_yaml = yaml.safe_load(f)
-                            if 'foldseek_bin' in foldseek_yaml and 'foldseek_bin' not in foldseek_config:
-                                foldseek_config['foldseek_bin'] = foldseek_yaml['foldseek_bin']
-                            if 'foldseek_database' in foldseek_yaml:
-                                foldseek_config['foldseek_database'] = foldseek_yaml['foldseek_database']
-                            print(f"Loaded FoldSeek config from {foldseek_yaml_path}")
-                    except Exception as e:
-                        print(f"Warning: Failed to load foldseek.yaml: {e}")
             
             # Debug: print configuration
             print(f"FoldSeek config - bin: {foldseek_config.get('foldseek_bin', 'NOT SET')}")
@@ -1373,11 +1381,27 @@ class Evaluation():
         print(f"metrics computation completed and saved to {output_csv}.")
     
     def run_nuc_evaluation(self, pipeline_dir: str, output_csv: str):
+        def _infer_inverse_fold_name(refold_path: Path) -> str:
+            """
+            Map AF3 output CIF name to inverse_fold CIF stem.
+            Handles both:
+              - <name>_model.cif
+              - <name>_seed-1_sample-0_model.cif
+            """
+            stem = refold_path.stem
+            if stem.endswith("_model"):
+                stem = stem[: -len("_model")]
+            # Remove AF3 per-seed suffix, keep the original design name.
+            if "_seed-" in stem and "_sample-" in stem:
+                stem = stem.split("_seed-", 1)[0]
+            return stem
         
         def process_metrics_worker(refold_path: Path):
             try:
-                sample_name = refold_path.parent.name
-                inverse_fold_path = os.path.join(pipeline_dir, "inverse_fold", f"{sample_name}.cif")
+                sample_name = _infer_inverse_fold_name(refold_path)
+                inverse_fold_path = os.path.join(
+                    pipeline_dir, "inverse_fold", f"{sample_name}.cif"
+                )
                 rmsd = RMSDCalculator.compute_C4_rmsd(pred=str(refold_path), refold=inverse_fold_path)
                 tmscore = USalign.compute_tmscore(pred=inverse_fold_path, refold=str(refold_path))
                 result_data = {
@@ -1405,6 +1429,10 @@ class Evaluation():
                     raw_data[sample_name] = result_data
 
         df = pd.DataFrame.from_dict(raw_data, orient='index')
+        if df.empty:
+            print("Warning: No valid NUC evaluation rows were produced; writing empty CSV and skipping clustering.")
+            df.to_csv(output_csv, index=True)
+            return
 
         op_map = {
             '>': operator.gt,
@@ -1419,25 +1447,25 @@ class Evaluation():
                 print(f"Warning: Metric '{metric_name}' in config does not exist in DataFrame, skipping.")
                 continue
 
-        try:
-            # 2.1 Parse condition string, e.g., ">/0.45"
-            op_str, val_str = threshold.split('/')
-            threshold_value = float(val_str)
-            
-            # 2.2 Get corresponding operator function, e.g., operator.gt
-            op_func = op_map[op_str]
-            
-            # 2.3 Apply operator to entire column (vectorized operation)
-            # Example: op_func(df_metrics['metric_1'], 0.45)
-            # This returns a boolean Series indicating which rows satisfy the condition
-            condition_series = op_func(df[metric_name], threshold_value)
-            all_condition_series.append(condition_series)
+            try:
+                # 2.1 Parse condition string, e.g., ">/0.45"
+                op_str, val_str = threshold.split('/')
+                threshold_value = float(val_str)
+                
+                # 2.2 Get corresponding operator function, e.g., operator.gt
+                op_func = op_map[op_str]
+                
+                # 2.3 Apply operator to entire column (vectorized operation)
+                # Example: op_func(df_metrics['metric_1'], 0.45)
+                # This returns a boolean Series indicating which rows satisfy the condition
+                condition_series = op_func(df[metric_name], threshold_value)
+                all_condition_series.append(condition_series)
 
-        except (ValueError, KeyError, IndexError) as e:
-            print(f"Error: Cannot parse condition '{threshold}' (metric: {metric_name}). Please check format. Error: {e}")
-            # If a condition parsing fails, we can either make all samples fail
-            # or skip this condition. Here we create an all-False Series
-            all_condition_series.append(pd.Series(False, index=df.index))
+            except (ValueError, KeyError, IndexError) as e:
+                print(f"Error: Cannot parse condition '{threshold}' (metric: {metric_name}). Please check format. Error: {e}")
+                # If a condition parsing fails, we can either make all samples fail
+                # or skip this condition. Here we create an all-False Series
+                all_condition_series.append(pd.Series(False, index=df.index))
         
         if not all_condition_series:
             print("No valid thresholds applied.")
@@ -1467,7 +1495,10 @@ class Evaluation():
         for case, backbones in success_backbone_list.items():
             with open(os.path.join(pipeline_dir, "cluster", "success", f"{case}_success_backbones.list"), 'w') as f:
                 f.write('\n'.join(backbones))
-        
+        if not success_backbone_list:
+            print("Warning: No successful NUC backbones after thresholding; skip qTMclust metrics.")
+            return
+
         USalign.compute_qTMclust_metrics(
             success_dir=os.path.join(pipeline_dir, "cluster", "success"),
             gen_dir=os.path.join(pipeline_dir, "formatted_designs"),
