@@ -59,6 +59,46 @@ class RMSDCalculator():
             if res_id not in by_res_id:
                 by_res_id[res_id] = coord
         return by_res_id
+
+    @staticmethod
+    def _residue_atom_coord_map(
+        arr,
+        atom_name: str,
+        chain_ids: Optional[Sequence[str]] = None,
+        hetero: Optional[bool] = False,
+    ) -> Dict[Tuple[str, int, str], np.ndarray]:
+        chain_set = RMSDCalculator._normalize_chain_ids(chain_ids)
+        mask = arr.atom_name == atom_name
+        if hetero is not None:
+            mask &= arr.hetero == hetero
+        if chain_set is not None:
+            mask &= np.isin(arr.chain_id, list(chain_set))
+
+        out: Dict[Tuple[str, int, str], np.ndarray] = {}
+        if np.sum(mask) == 0:
+            return out
+
+        annotation_categories = set(arr.get_annotation_categories())
+        has_ins_code = "ins_code" in annotation_categories
+        for idx in np.flatnonzero(mask):
+            ins_code = str(arr.ins_code[idx]).strip() if has_ins_code else ""
+            key = (str(arr.chain_id[idx]), int(arr.res_id[idx]), ins_code)
+            if key not in out:
+                out[key] = arr.coord[idx]
+        return out
+
+    @staticmethod
+    def _shared_coord_arrays(
+        ref_coord_map: Dict[Tuple[str, int, str], np.ndarray],
+        pred_coord_map: Dict[Tuple[str, int, str], np.ndarray],
+    ) -> Tuple[np.ndarray, np.ndarray, List[Tuple[str, int, str]]]:
+        shared_keys = sorted(set(ref_coord_map) & set(pred_coord_map))
+        if not shared_keys:
+            return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.float32), []
+
+        ref_coords = np.stack([ref_coord_map[key] for key in shared_keys], axis=0)
+        pred_coords = np.stack([pred_coord_map[key] for key in shared_keys], axis=0)
+        return ref_coords, pred_coords, shared_keys
     
     @staticmethod
     def compute_C4_rmsd(pred: str, refold: str):
@@ -245,24 +285,63 @@ class RMSDCalculator():
     
     @staticmethod
     def compute_protein_align_nuc_rmsd(pred: str, refold: str, trb: str):
-        if pred.endswith('.cif'):
-            pred_structure = pdbx.get_structure(pdbx.CIFFile.read(pred), model=1)
-        else:
-            pred_structure = pdb.get_structure(pdb.PDBFile.read(pred), model=1)
-        
-        if refold.endswith('.cif'):
-            refold_structure = pdbx.get_structure(pdbx.CIFFile.read(refold), model=1)
-        else:
-            refold_structure = pdb.get_structure(pdb.PDBFile.read(refold), model=1)
-        
+        pred_structure = RMSDCalculator._load_structure(pred)
+        refold_structure = RMSDCalculator._load_structure(refold)
+
         trb = pickle.load(open(trb, 'rb'))
-        cond_chain = trb.chain_id[trb.condition_token_mask][0]
-        pred_structure_c4_and_cond = pred_structure[(pred_structure.chain_id == cond_chain) | (pred_structure.atom_name == "C4'")]
-        refold_structure_c4_and_cond = refold_structure[(refold_structure.chain_id == cond_chain) | (refold_structure.atom_name == "C4'")]
-        cond_mask = pred_structure_c4_and_cond.chain_id == cond_chain
-        c4_mask = pred_structure_c4_and_cond.atom_name == "C4'"
-        pred_coord_align, _ = struc.superimpose(refold_structure_c4_and_cond.coord, pred_structure_c4_and_cond.coord, cond_mask)
-        align_nuc_rmsd = struc.rmsd(refold_structure_c4_and_cond.coord[c4_mask], pred_coord_align[c4_mask])
+        cond_chain = str(trb.chain_id[trb.condition_token_mask][0]).strip()
+
+        # AF3 can add missing side-chain atoms and OXT to the protein chain.
+        # Align on shared protein CA residues instead of assuming full-atom
+        # arrays are identical between the reference and refolded structures.
+        pred_ca_map = RMSDCalculator._residue_atom_coord_map(
+            pred_structure,
+            atom_name="CA",
+            chain_ids=[cond_chain],
+            hetero=False,
+        )
+        refold_ca_map = RMSDCalculator._residue_atom_coord_map(
+            refold_structure,
+            atom_name="CA",
+            chain_ids=[cond_chain],
+            hetero=False,
+        )
+        refold_ca_coords, pred_ca_coords, shared_ca = RMSDCalculator._shared_coord_arrays(
+            refold_ca_map,
+            pred_ca_map,
+        )
+        if len(shared_ca) == 0:
+            raise ValueError(
+                f"No shared protein CA residues found on condition chain {cond_chain}: "
+                f"pred={len(pred_ca_map)} ref={len(refold_ca_map)}"
+            )
+
+        _, transform = struc.superimpose(refold_ca_coords, pred_ca_coords)
+
+        pred_c4_map = RMSDCalculator._residue_atom_coord_map(
+            pred_structure,
+            atom_name="C4'",
+            chain_ids=None,
+            hetero=False,
+        )
+        refold_c4_map = RMSDCalculator._residue_atom_coord_map(
+            refold_structure,
+            atom_name="C4'",
+            chain_ids=None,
+            hetero=False,
+        )
+        refold_c4_coords, pred_c4_coords, shared_c4 = RMSDCalculator._shared_coord_arrays(
+            refold_c4_map,
+            pred_c4_map,
+        )
+        if len(shared_c4) == 0:
+            raise ValueError(
+                f"No shared nucleic C4' residues found after aligning condition chain {cond_chain}: "
+                f"pred={len(pred_c4_map)} ref={len(refold_c4_map)}"
+            )
+
+        pred_c4_coords_aligned = transform.apply(pred_c4_coords)
+        align_nuc_rmsd = struc.rmsd(refold_c4_coords, pred_c4_coords_aligned)
         return align_nuc_rmsd
     
     # @staticmethod

@@ -329,6 +329,115 @@ CD3d_0,B,A
 CD3d_1,B,A
 ```
 
+### Ligand Binding Protein (LBP)
+
+LBP evaluates ligand-binding protein designs, where the ligand is retained during inverse folding and the designed protein is refolded with Chai-1.
+
+- Input: ligand-containing design structures (`.cif` recommended)
+- Recommended layout: nested case folders such as `design_dir/FAD/FAD_seed_1_bb_0_seq_0.cif`
+- Inverse fold: LigandMPNN
+- Refold: Chai-1
+- Evaluation: `plddt`, `ipae`, `min_ipae`, `iptm`, `ptm_binder`, plus Foldseek-based diversity/novelty
+
+LBP uses the CCD components database during ligand handling. By default the repo expects:
+
+- `preprocess/ccd_component/components.cif`
+
+If this file is missing, download it from wwPDB and place it there:
+
+```bash
+cd /path/to/ODesignBench/preprocess/ccd_component
+wget https://files.wwpdb.org/pub/pdb/data/monomers/components.cif.gz
+gunzip -f components.cif.gz
+```
+
+Minimal run command:
+
+```bash
+python scripts/run_lbp_pipeline.py \
+  design_dir=/path/to/ligand_binding_protein_designs \
+  gpus=0
+```
+
+Optional: set `root=/path/to/output_dir` to change output location (default: `results`).
+
+Recommended example layout:
+
+```text
+examples/ligand_binding_protein/
+`-- FAD/
+    `-- FAD_seed_1_bb_0_seq_0.cif
+```
+
+Example run:
+
+```bash
+python3 scripts/run_lbp_pipeline.py \
+  design_dir=examples/ligand_binding_protein \
+  gpus=0 \
+  root=results/examples/ligand_binding_protein
+```
+
+Successful runs will write the final evaluation table to `raw_data.csv`.
+
+### Protein Binding Nucleic Acid (PBN)
+
+PBN evaluates designed protein-nucleic acid complexes, where the protein chain is treated as the fixed conditioning partner and the nucleic-acid chain is the designed partner.
+
+- Input: sequence-assigned complex structures (`.cif` recommended)
+- Required metadata: `pbn_info.csv`
+- Current validated input contract: the input structures are already post-inversefold outputs (for example ODesign `*_bb_*_seq_*.cif`)
+- Inverse fold: skipped inside ODesignBench for this workflow; inputs are copied into `inverse_fold/` and treated as the post-inversefold reference structures
+- Refold: AlphaFold3
+- Evaluation: protein-aligned nucleic-acid `C4'` RMSD
+
+`pbn_info.csv` must provide one row per design with at least:
+
+- `design_name`
+- `target_chain`
+- `design_chain`
+
+Example:
+
+```csv
+design_name,target_chain,design_chain
+prot_binding_rna_demo_seed_2_bb_0_seq_0,A,B
+```
+
+Recommended example layout:
+
+```text
+examples/protein_binding_nuc/
+|-- pbn_info.csv
+`-- prot_binding_rna_demo_seed_2_bb_0_seq_0.cif
+```
+
+Current validated wrapper:
+
+```bash
+cd /path/to/ODesignBench
+bash tmp/run_pbn.sh
+```
+
+Useful overrides:
+
+```bash
+cd /path/to/ODesignBench
+RUN_TAG=pbn_example \
+TEST_INPUT_CIF=examples/protein_binding_nuc/prot_binding_rna_demo_seed_2_bb_0_seq_0.cif \
+CHAIN_INFO_CSV=examples/protein_binding_nuc/pbn_info.csv \
+bash tmp/run_pbn.sh
+```
+
+Successful runs will write:
+
+- preprocessed inputs to `formatted_designs/`
+- copied post-inversefold references to `inverse_fold/`
+- AlphaFold3 outputs to `refold/af3_out/`
+- final metrics to `raw_data.csv`
+
+The current evaluator aligns on shared protein `CA` residues and reports RMSD on shared nucleic-acid `C4'` atoms, so AF3 side-chain completion on the protein chain does not break scoring.
+
 ### Protein Binding Ligand (PBL)
 
 PBL evaluates ligand-containing protein structures and reports geometry, chemistry, and optional Vina docking metrics.
@@ -481,8 +590,21 @@ python3 scripts/run_pbp_pipeline.py design_dir=examples/protein_binding_protein/
 
 ### 2. Ligand Binding Protein
 
-wget https://files.wwpdb.org/pub/pdb/data/monomers/components.cif.gz to the ccd path 
-gunzip components.cif.gz
+```bash
+cd /path/to/ODesignBench
+python3 scripts/run_lbp_pipeline.py \
+  design_dir=examples/ligand_binding_protein \
+  gpus=0 \
+  root=results/examples/ligand_binding_protein
+```
+
+If `preprocess/ccd_component/components.cif` is missing, download it first:
+
+```bash
+cd preprocess/ccd_component
+wget https://files.wwpdb.org/pub/pdb/data/monomers/components.cif.gz
+gunzip -f components.cif.gz
+```
 
 ### 3. Atomic Motif Scaffolding / Enzyme Design (AME)
 
@@ -500,6 +622,16 @@ python3 scripts/run_pbl_pipeline.py design_dir=examples/protein_binding_ligand/ 
 
 ```bash
 python3 scripts/run_nuc_pipeline.py design_dir=examples/nuc/rna/ refold.run_data_pipeline=true gpus=0 root=results/examples/nuc
+```
+
+### 6. Protein Binding Nucleic Acid (PBN)
+
+```bash
+cd /path/to/ODesignBench
+RUN_TAG=pbn_example \
+TEST_INPUT_CIF=examples/protein_binding_nuc/prot_binding_rna_demo_seed_2_bb_0_seq_0.cif \
+CHAIN_INFO_CSV=examples/protein_binding_nuc/pbn_info.csv \
+bash tmp/run_pbn.sh
 ```
 
 ## Repository Layout
