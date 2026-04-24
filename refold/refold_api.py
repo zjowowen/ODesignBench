@@ -1533,7 +1533,8 @@ class ReFold:
         Args:
             backbone_dir: Directory containing backbone PDB files from LigandMPNN.
             output_dir: Output directory for FASTA files.
-            ccd_path: Path to CCD components.cif file. Searches common locations if None.
+            ccd_path: Path to CCD components.cif file. Defaults to
+                      preprocess/ccd_component/components.cif if None.
             inverse_fold_dir: Root inversefold dir (parent of backbones/); used to find
                               seqs/ for LigandMPNN-generated sequences.
         """
@@ -1544,23 +1545,23 @@ class ReFold:
         backbone_path_list = list(Path(backbone_dir).glob("*.pdb"))
         os.makedirs(output_dir, exist_ok=True)
 
-        # Locate CCD components.cif
-        if ccd_path is None:
-            candidates = [
-                Path(__file__).resolve().parents[2] / "ODesign-pipeline" / "ODesign" / "data" / "components.v20240608.cif",
-                Path(__file__).resolve().parents[1] / "data" / "components.cif",
-                Path("/mnt/shared-storage-user/liuxinping/ODesign-pipeline/ODesign/data/components.v20240608.cif"),
-            ]
-            for c in candidates:
-                if c.exists():
-                    ccd_path = str(c)
-                    break
-        if ccd_path is None or not Path(ccd_path).exists():
+        default_ccd_path = (
+            Path(__file__).resolve().parents[1]
+            / "preprocess"
+            / "ccd_component"
+            / "components.cif"
+        )
+        resolved_ccd_path = Path(str(ccd_path)) if ccd_path is not None else default_ccd_path
+        if not resolved_ccd_path.is_absolute():
+            resolved_ccd_path = Path(__file__).resolve().parents[1] / resolved_ccd_path
+
+        if not resolved_ccd_path.exists():
             raise FileNotFoundError(
-                f"CCD components.cif not found. Tried: {candidates}. "
-                "Pass ccd_path= explicitly or set it in config."
+                f"CCD components.cif not found: {resolved_ccd_path}. "
+                f"Pass ccd_path= explicitly or place it at {default_ccd_path}."
             )
 
+        ccd_path = str(resolved_ccd_path)
         ccd_parser = LocalCcdParser(ccd_path)
 
         # Locate seqs/ directory for LigandMPNN-generated sequences

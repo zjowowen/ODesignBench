@@ -11,6 +11,7 @@ import numpy as np
 from pathlib import Path
 from collections import defaultdict, Counter
 import concurrent.futures
+from biotite.structure.io import pdb, pdbx
 from evaluation.metrics.rmsd import RMSDCalculator
 from evaluation.metrics.confidence import Confidence
 from evaluation.metrics.usalign import USalign
@@ -18,7 +19,7 @@ from evaluation.metrics.foldseek import FoldSeek
 import json
 import glob
 import re
-from typing import Optional, Any
+from typing import Optional, Any, Sequence
 
 class Evaluation():
 
@@ -60,6 +61,7 @@ class Evaluation():
             "protein": self.run_protein_evaluation,
             "pbp": self.run_protein_binding_protein_evaluation,
             "lbp": self.run_ligand_binding_protein_evaluation,
+            "interface": self.run_interface_evaluation,
             "nuc": self.run_nuc_evaluation,
             "nbl": self.run_nuc_binding_ligand_evaluation,
             "pbn": self.run_protein_binding_nuc_evaluation,
@@ -98,7 +100,16 @@ class Evaluation():
         total_designs = len(design_names)
 
         formatted_designs_dir = os.path.join(pipeline_dir, "formatted_designs")
+
+        def _find_formatted_structure(candidate_name: str) -> str | None:
+            for ext in (".pdb", ".cif"):
+                candidate_path = os.path.join(formatted_designs_dir, f"{candidate_name}{ext}")
+                if os.path.exists(candidate_path):
+                    return candidate_path
+            return None
+
         resolved_design_names: list[str] = []
+        resolved_design_paths: dict[str, str] = {}
         missing_design_names: list[str] = []
         seen_resolved: set[str] = set()
         for design_name in design_names:
@@ -109,12 +120,15 @@ class Evaluation():
                     candidates.append(base_name)
 
             resolved_name = None
+            resolved_path = None
             for cand in candidates:
-                if os.path.exists(os.path.join(formatted_designs_dir, f"{cand}.pdb")):
+                candidate_path = _find_formatted_structure(cand)
+                if candidate_path is not None:
                     resolved_name = cand
+                    resolved_path = candidate_path
                     break
 
-            if resolved_name is None:
+            if resolved_name is None or resolved_path is None:
                 missing_design_names.append(design_name)
                 continue
 
@@ -122,6 +136,7 @@ class Evaluation():
             if resolved_name not in seen_resolved:
                 seen_resolved.add(resolved_name)
                 resolved_design_names.append(resolved_name)
+                resolved_design_paths[resolved_name] = resolved_path
 
         num_designable = len(resolved_design_names)
         designability = (num_designable / total_designs) if total_designs > 0 else 0.0
@@ -165,14 +180,24 @@ class Evaluation():
             )
             os.makedirs(designable_structure_dir, exist_ok=True)
 
-            # Copy designable structure files from formatted_designs to temporary directory
+            # Copy designable structure files from formatted_designs to temporary directory.
+            # FoldSeek expects PDB inputs, so convert CIFs on the fly when needed.
             for design_name in resolved_design_names:
-                src_path = os.path.join(formatted_designs_dir, f"{design_name}.pdb")
+                src_path = resolved_design_paths[design_name]
                 dst_path = os.path.join(designable_structure_dir, f"{design_name}.pdb")
-                if os.path.exists(src_path):
+                if src_path.endswith(".pdb"):
                     shutil.copy2(src_path, dst_path)
+                elif src_path.endswith(".cif"):
+                    try:
+                        cif_file = pdbx.CIFFile.read(src_path)
+                        atom_array = pdbx.get_structure(cif_file, model=1)
+                        pdb_file = pdb.PDBFile()
+                        pdb_file.set_structure(atom_array)
+                        pdb_file.write(dst_path)
+                    except Exception as exc:
+                        print(f"Warning: Failed to convert CIF to PDB for FoldSeek: {src_path}: {exc}")
                 else:
-                    print(f"Warning: Design structure not found for FoldSeek: {src_path}")
+                    print(f"Warning: Unsupported structure format for FoldSeek: {src_path}")
             if missing_design_names:
                 print(
                     "Warning: Some evaluation rows could not be mapped to formatted_designs. "
@@ -649,22 +674,6 @@ class Evaluation():
                 foldseek_config['foldseek_database'] = self.config.metrics.foldseek_database
             foldseek_config['verbose'] = getattr(self.config.metrics, 'verbose', False)
             
-            # Fallback: try to load from foldseek.yaml if not in metrics config
-            if 'foldseek_database' not in foldseek_config or not foldseek_config['foldseek_database']:
-                import yaml
-                foldseek_yaml_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'configs', 'foldseek.yaml')
-                if os.path.exists(foldseek_yaml_path):
-                    try:
-                        with open(foldseek_yaml_path, 'r') as f:
-                            foldseek_yaml = yaml.safe_load(f)
-                            if 'foldseek_bin' in foldseek_yaml and 'foldseek_bin' not in foldseek_config:
-                                foldseek_config['foldseek_bin'] = foldseek_yaml['foldseek_bin']
-                            if 'foldseek_database' in foldseek_yaml:
-                                foldseek_config['foldseek_database'] = foldseek_yaml['foldseek_database']
-                            print(f"Loaded FoldSeek config from {foldseek_yaml_path}")
-                    except Exception as e:
-                        print(f"Warning: Failed to load foldseek.yaml: {e}")
-            
             # Debug: print configuration
             print(f"FoldSeek config - bin: {foldseek_config.get('foldseek_bin', 'NOT SET')}")
             print(f"FoldSeek config - database: {foldseek_config.get('foldseek_database', 'NOT SET')}")
@@ -1099,23 +1108,52 @@ class Evaluation():
         df.to_csv(output_csv, index=True)
         print(f"metrics computation completed and saved to {output_csv}.")
     
-    def run_ligand_binding_protein_evaluation(self, pipeline_dir: str, cands: str, output_csv: str):
+    def run_ligand_binding_protein_evaluation(
+        self,
+        pipeline_dir: str,
+        cands: str,
+        output_csv: str,
+        lbp_info_csv: Optional[str] = None,
+    ):
+        lbp_info_df = None
+        if lbp_info_csv is not None and os.path.exists(lbp_info_csv):
+            from inversefold.lbp_csv_utils import load_lbp_info_csv, match_pdb_to_lbp_info
+
+            lbp_info_df = load_lbp_info_csv(lbp_info_csv)
+        else:
+            match_pdb_to_lbp_info = None
         
         def process_metrics_worker(cand: Path):
+            refold_path = None
             try:
                 refold_paths = cand.cif_paths
                 result_data_all = defaultdict(dict)
                 refold_path = refold_paths[0]
                 sample_name = refold_path.parent.name
-                inverse_fold_path = os.path.join(pipeline_dir, "inverse_fold", "backbones", f"{sample_name}.pdb")
-                # trb_path = os.path.join(pipeline_dir, "formatted_designs", f"{sample_name.rsplit('-',1)[0]}.pkl")
-                plddt, ipae, min_ipae, iptm, ptm_binder = Confidence.gather_chai1_confidence(cand, inverse_fold_path)
+                inverse_fold_path = self._resolve_chai_backbone_path(pipeline_dir, sample_name)
+
+                design_chain = None
+                if lbp_info_df is not None and match_pdb_to_lbp_info is not None:
+                    matched_info = match_pdb_to_lbp_info(Path(inverse_fold_path), lbp_info_df)
+                    if matched_info is not None:
+                        design_chain = matched_info["design_chain"]
+
+                plddt, ipae, min_ipae, iptm, ptm_binder_fallback = Confidence.gather_chai1_confidence(
+                    cand,
+                    inverse_fold_path,
+                )
+                ptm_binder = self._compute_chai_design_chain_ptm(
+                    cand,
+                    inverse_fold_path,
+                    design_chain,
+                    fallback=ptm_binder_fallback,
+                )
                 
                 result_data_all[f"{sample_name}"] = {
                     'plddt': plddt,
                     'ipae': ipae,
                     'min_ipae': min_ipae,
-                    'iptm': iptm,
+                    'iptm': self._scalarize_metric(iptm),
                     'ptm_binder': ptm_binder,
                 }
                 return result_data_all
@@ -1146,6 +1184,152 @@ class Evaluation():
             output_csv=output_csv,
             subdir_suffix="ligand_binding_protein",
         )
+        df.to_csv(output_csv, index=True)
+        print(f"metrics computation completed and saved to {output_csv}.")
+
+    def run_interface_evaluation(
+        self,
+        pipeline_dir: str,
+        cands: str,
+        output_csv: str,
+        pocket_cutoff: float = 3.5,
+        interface_info_csv: Optional[str] = None,
+        lbp_info_csv: Optional[str] = None,
+    ):
+        from inversefold.interface_utils import (
+            calculate_pocket_residues_from_ligand_proximity,
+            load_interface_info_csv,
+            match_name_to_interface_info,
+        )
+        from inversefold.lbp_csv_utils import load_lbp_info_csv, match_pdb_to_lbp_info
+
+        interface_info = None
+        if interface_info_csv is not None and os.path.exists(interface_info_csv):
+            interface_info = load_interface_info_csv(interface_info_csv)
+
+        lbp_info_df = None
+        if lbp_info_csv is not None and os.path.exists(lbp_info_csv):
+            lbp_info_df = load_lbp_info_csv(lbp_info_csv)
+
+        def _mean_ca_plddt_for_residues(struct_path: str, residue_keys: Sequence[str]) -> float:
+            residue_keys = [str(x).strip() for x in residue_keys if str(x).strip()]
+            if not residue_keys:
+                return float("nan")
+
+            if struct_path.endswith(".cif"):
+                atom_array = pdbx.get_structure(
+                    pdbx.CIFFile.read(struct_path),
+                    model=1,
+                    extra_fields=["b_factor"],
+                )
+            else:
+                atom_array = pdb.get_structure(
+                    pdb.PDBFile.read(struct_path),
+                    model=1,
+                    extra_fields=["b_factor"],
+                )
+
+            residue_ids = np.char.add(
+                atom_array.chain_id.astype(str),
+                np.asarray(atom_array.res_id, dtype=str),
+            )
+            mask = (~atom_array.hetero) & (atom_array.atom_name == "CA") & np.isin(residue_ids, residue_keys)
+            if np.sum(mask) == 0:
+                return float("nan")
+
+            plddt = float(np.mean(atom_array.b_factor[mask]))
+            if plddt > 1.5:
+                plddt = plddt / 100.0
+            return plddt
+
+        def process_metrics_worker(cand: Path):
+            refold_path = None
+            try:
+                refold_paths = cand.cif_paths
+                refold_path = refold_paths[0]
+                sample_name = refold_path.parent.name
+                inverse_fold_path = self._resolve_chai_backbone_path(pipeline_dir, sample_name)
+
+                if interface_info is not None:
+                    matched_info = match_name_to_interface_info(sample_name, interface_info)
+                else:
+                    matched_info = None
+
+                design_chain = None
+                if matched_info is not None and matched_info.get("design_chain", None):
+                    design_chain = matched_info["design_chain"]
+                elif lbp_info_df is not None:
+                    lbp_match = match_pdb_to_lbp_info(Path(inverse_fold_path), lbp_info_df)
+                    if lbp_match is not None:
+                        design_chain = lbp_match["design_chain"]
+
+                if matched_info is not None:
+                    pocket_residues = matched_info["pocket_residues"]
+                else:
+                    pocket_residues = calculate_pocket_residues_from_ligand_proximity(
+                        inverse_fold_path,
+                        pocket_cutoff=pocket_cutoff,
+                        design_chain=design_chain,
+                    )
+
+                global_plddt, ipae, min_ipae, iptm, ptm_binder_fallback = Confidence.gather_chai1_confidence(
+                    cand,
+                    inverse_fold_path,
+                )
+                ptm_binder = self._compute_chai_design_chain_ptm(
+                    cand,
+                    inverse_fold_path,
+                    design_chain,
+                    fallback=ptm_binder_fallback,
+                )
+                pocket_plddt = _mean_ca_plddt_for_residues(str(refold_path), pocket_residues)
+                if np.isnan(pocket_plddt):
+                    pocket_plddt = global_plddt
+
+                result_data = {
+                    "sc_rmsd": RMSDCalculator.compute_protein_backbone_rmsd(
+                        pred=inverse_fold_path,
+                        refold=str(refold_path),
+                    ),
+                    "pocket_rmsd": RMSDCalculator.compute_protein_backbone_rmsd_subset(
+                        pred=inverse_fold_path,
+                        refold=str(refold_path),
+                        residue_keys=pocket_residues,
+                    ),
+                    "plddt": pocket_plddt,
+                    "global_plddt": global_plddt,
+                    "ipae": ipae,
+                    "min_ipae": min_ipae,
+                    "iptm": self._scalarize_metric(iptm),
+                    "ptm_binder": ptm_binder,
+                    "pocket_residue_count": len(pocket_residues),
+                }
+                return sample_name, result_data
+
+            except Exception as e:
+                refold_name = str(refold_path) if refold_path is not None else "<unknown>"
+                print(f"Warning: Error processing {refold_name}: {e}")
+                return None, None
+
+        raw_data = defaultdict(dict)
+        cands = pickle.load(open(cands, "rb"))
+        print(f"{len(cands)} files were found for interface evaluation.")
+        futures = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.metrics.num_workers) as executor:
+            for cand in cands:
+                future = executor.submit(process_metrics_worker, cand)
+                futures.append(future)
+            for future in tqdm.tqdm(
+                concurrent.futures.as_completed(futures),
+                total=len(cands),
+                desc="computing metrics",
+            ):
+                sample_name, result_data = future.result()
+                if sample_name is not None and result_data is not None:
+                    raw_data[sample_name] = result_data
+
+        df = pd.DataFrame.from_dict(raw_data, orient="index")
         df.to_csv(output_csv, index=True)
         print(f"metrics computation completed and saved to {output_csv}.")
     
@@ -1567,11 +1751,94 @@ class Evaluation():
             evaluator.motif_name = motif_name
 
         results = evaluator.run_evaluation(
-            input_dir=input_dir,
-            output_dir=output_dir,
-            metadata_file=metadata_file,
-            motif_name=motif_name,
-        )
+                input_dir=input_dir,
+                output_dir=output_dir,
+                metadata_file=metadata_file,
+                motif_name=motif_name,
+            )
         return results
+
+    @staticmethod
+    def _resolve_chai_backbone_path(pipeline_dir: str, sample_name: str) -> str:
+        candidates = []
+        normalized = Path(sample_name).stem
+        base_name = re.sub(r"-\d+$", "", normalized)
+        for name in [normalized, base_name]:
+            for parent in [
+                Path(pipeline_dir) / "inverse_fold" / "backbones",
+                Path(pipeline_dir) / "formatted_designs",
+            ]:
+                for suffix in [".pdb", ".cif"]:
+                    candidates.append(parent / f"{name}{suffix}")
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        raise FileNotFoundError(
+            f"Could not resolve reference backbone for sample '{sample_name}'. "
+            f"Tried: {', '.join(str(p) for p in candidates)}"
+        )
+
+    @staticmethod
+    def _ordered_chain_ids_for_structure(struct_path: str) -> list[str]:
+        if struct_path.endswith(".cif"):
+            atom_array = pdbx.get_structure(
+                pdbx.CIFFile.read(struct_path),
+                model=1,
+                extra_fields=["b_factor"],
+            )
+        else:
+            atom_array = pdb.get_structure(
+                pdb.PDBFile.read(struct_path),
+                model=1,
+                extra_fields=["b_factor"],
+            )
+
+        chain_ids: list[str] = []
+        for chain_id in atom_array.chain_id.tolist():
+            chain_id = str(chain_id).strip()
+            if chain_id and chain_id not in chain_ids:
+                chain_ids.append(chain_id)
+        return chain_ids
+
+    @staticmethod
+    def _scalarize_metric(value):
+        if value is None:
+            return np.nan
+        try:
+            arr = np.asarray(value)
+            if arr.size == 0:
+                return np.nan
+            return float(arr.reshape(-1)[0])
+        except Exception:
+            try:
+                return float(value)
+            except Exception:
+                return value
+
+    @staticmethod
+    def _compute_chai_design_chain_ptm(
+        cand,
+        inverse_fold_path: str,
+        design_chain: Optional[str],
+        fallback: Any = np.nan,
+    ) -> float:
+        if not design_chain or not inverse_fold_path or not os.path.exists(inverse_fold_path):
+            return Evaluation._scalarize_metric(fallback)
+        try:
+            chain_ids = Evaluation._ordered_chain_ids_for_structure(inverse_fold_path)
+            design_chain = str(design_chain).strip()
+            if design_chain not in chain_ids:
+                return Evaluation._scalarize_metric(fallback)
+
+            per_chain_ptm = cand.ranking_data[0].ptm_scores.per_chain_ptm
+            idx = chain_ids.index(design_chain)
+            arr = np.asarray(per_chain_ptm)
+            if arr.ndim == 2:
+                return float(arr[0, idx])
+            if arr.ndim == 1:
+                return float(arr[idx])
+            return Evaluation._scalarize_metric(fallback)
+        except Exception:
+            return Evaluation._scalarize_metric(fallback)
 
     # Antibody developability and antibody-interface evaluation removed (not needed for this benchmark)
