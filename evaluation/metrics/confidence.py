@@ -267,7 +267,7 @@ class Confidence:
         return plddt, ipae, min_ipae, iptm, ptm_binder, ptm_H, ptm_L
     
     @staticmethod
-    def gather_chai1_confidence(cand: str, inverse_fold_path: str):
+    def gather_chai1_confidence(cand: str, inverse_fold_path: str, chai_cif_path: str | None = None):
         # Check if cand has required attributes
         if not hasattr(cand, 'token_asym_id') or cand.token_asym_id is None:
             # Fallback: try to extract plddt from CIF file if available
@@ -277,11 +277,15 @@ class Confidence:
             iptm = np.nan
             ptm_binder = np.nan
             
-            # Try to get plddt from CIF file if cand has cif_paths
-            if hasattr(cand, 'cif_paths') and cand.cif_paths:
+            # Prefer source-side canonical returned CIF path when provided.
+            fallback_cif_path = chai_cif_path
+            if fallback_cif_path is None and hasattr(cand, 'cif_paths') and cand.cif_paths:
+                fallback_cif_path = str(cand.cif_paths[0])
+
+            if fallback_cif_path:
                 try:
                     from biotite.structure.io import pdbx
-                    cif_file = pdbx.CIFFile.read(str(cand.cif_paths[0]))
+                    cif_file = pdbx.CIFFile.read(str(fallback_cif_path))
                     atom_array = pdbx.get_structure(cif_file, model=1, extra_fields=['b_factor'])
                     if 'b_factor' in atom_array.get_annotation():
                         plddt_values = atom_array.b_factor[atom_array.atom_name == 'CA']

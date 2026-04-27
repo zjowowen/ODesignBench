@@ -1123,13 +1123,20 @@ class Evaluation():
         else:
             match_pdb_to_lbp_info = None
         
-        def process_metrics_worker(cand: Path):
+        raw_data = defaultdict(dict)
+        cands = pickle.load(open(cands, 'rb'))
+        print(f"{len(cands)} files were found for evaluation.")
+        sample_artifacts = self._resolve_chai_sample_artifacts(
+            pipeline_dir,
+            cands,
+            require_local_cifs=False,
+        )
+
+        def process_metrics_worker(cand: Path, sample_name: str, local_refold_path: Optional[str]):
             refold_path = None
             try:
-                refold_paths = cand.cif_paths
                 result_data_all = defaultdict(dict)
-                refold_path = refold_paths[0]
-                sample_name = refold_path.parent.name
+                refold_path = Path(local_refold_path) if local_refold_path else Path(cand.cif_paths[0])
                 inverse_fold_path = self._resolve_chai_backbone_path(pipeline_dir, sample_name)
 
                 design_chain = None
@@ -1141,6 +1148,7 @@ class Evaluation():
                 plddt, ipae, min_ipae, iptm, ptm_binder_fallback = Confidence.gather_chai1_confidence(
                     cand,
                     inverse_fold_path,
+                    chai_cif_path=str(refold_path) if local_refold_path else None,
                 )
                 ptm_binder = self._compute_chai_design_chain_ptm(
                     cand,
@@ -1161,15 +1169,12 @@ class Evaluation():
             except Exception as e:
                 print(f"Warning: Error processing {refold_path}: {e}")
                 return None, None
-        
-        raw_data = defaultdict(dict)
-        cands = pickle.load(open(cands, 'rb'))
-        print(f"{len(cands)} files were found for evaluation.")
+
         futures = []
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.metrics.num_workers) as executor:
-            for cand in cands:
-                future = executor.submit(process_metrics_worker, cand)
+            for cand, (sample_name, local_refold_path) in zip(cands, sample_artifacts):
+                future = executor.submit(process_metrics_worker, cand, sample_name, local_refold_path)
                 futures.append(future)
             for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(cands), desc="computing metrics"):
                 result_data = future.result()
@@ -1242,12 +1247,19 @@ class Evaluation():
                 plddt = plddt / 100.0
             return plddt
 
-        def process_metrics_worker(cand: Path):
+        raw_data = defaultdict(dict)
+        cands = pickle.load(open(cands, "rb"))
+        print(f"{len(cands)} files were found for interface evaluation.")
+        sample_artifacts = self._resolve_chai_sample_artifacts(
+            pipeline_dir,
+            cands,
+            require_local_cifs=False,
+        )
+
+        def process_metrics_worker(cand: Path, sample_name: str, local_refold_path: Optional[str]):
             refold_path = None
             try:
-                refold_paths = cand.cif_paths
-                refold_path = refold_paths[0]
-                sample_name = refold_path.parent.name
+                refold_path = Path(local_refold_path) if local_refold_path else Path(cand.cif_paths[0])
                 inverse_fold_path = self._resolve_chai_backbone_path(pipeline_dir, sample_name)
 
                 if interface_info is not None:
@@ -1275,6 +1287,7 @@ class Evaluation():
                 global_plddt, ipae, min_ipae, iptm, ptm_binder_fallback = Confidence.gather_chai1_confidence(
                     cand,
                     inverse_fold_path,
+                    chai_cif_path=str(refold_path) if local_refold_path else None,
                 )
                 ptm_binder = self._compute_chai_design_chain_ptm(
                     cand,
@@ -1310,15 +1323,11 @@ class Evaluation():
                 refold_name = str(refold_path) if refold_path is not None else "<unknown>"
                 print(f"Warning: Error processing {refold_name}: {e}")
                 return None, None
-
-        raw_data = defaultdict(dict)
-        cands = pickle.load(open(cands, "rb"))
-        print(f"{len(cands)} files were found for interface evaluation.")
         futures = []
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.metrics.num_workers) as executor:
-            for cand in cands:
-                future = executor.submit(process_metrics_worker, cand)
+            for cand, (sample_name, local_refold_path) in zip(cands, sample_artifacts):
+                future = executor.submit(process_metrics_worker, cand, sample_name, local_refold_path)
                 futures.append(future)
             for future in tqdm.tqdm(
                 concurrent.futures.as_completed(futures),
@@ -1372,11 +1381,19 @@ class Evaluation():
             ame_csv_df = load_ame_csv(ame_csv)
             print(f"Loaded AME CSV with {len(ame_csv_df)} entries")
 
-        def process_metrics_worker(cand: Path):
+        raw_data = defaultdict(dict)
+        cands_obj = pickle.load(open(cands, "rb"))
+        print(f"{len(cands_obj)} files were found for evaluation.")
+        sample_artifacts = self._resolve_chai_sample_artifacts(
+            pipeline_dir,
+            cands_obj,
+            require_local_cifs=False,
+        )
+
+        def process_metrics_worker(cand: Path, sample_name: str, local_refold_path: Optional[str]):
+            refold_path = None
             try:
-                refold_paths = cand.cif_paths
-                refold_path = refold_paths[0]
-                sample_name = refold_path.parent.name
+                refold_path = Path(local_refold_path) if local_refold_path else None
 
                 # Convert chai1 directory name to formatted design name
                 # Remove the final -{1-8} suffix from seq_0-1-{1-8}
@@ -1427,11 +1444,12 @@ class Evaluation():
                 # Initialize result dict with only the two required metrics
                 result = {
                     "catalytic_heavy_atom_rmsd": np.nan,
-                    "ligand_clash_count_1_5A": 0,
+                    "ligand_clash_count_1_5A": np.nan,
+                    "metric_error": "",
                 }
                 
                 # Compute AME-specific metrics if motif residues are available
-                if motif_residues and os.path.exists(ref_backbone_path) and os.path.exists(des_pdb_path) and os.path.exists(str(refold_path)):
+                if motif_residues and os.path.exists(ref_backbone_path) and os.path.exists(des_pdb_path) and refold_path is not None and refold_path.exists():
                     try:
                         # Only compute the two required metrics: catalytic_heavy_atom_rmsd and ligand_clash_count_1_5A
                         # We need to extract these from compute_catalytic_constraints but only keep what we need
@@ -1445,18 +1463,23 @@ class Evaluation():
                         
                         # Only keep the two required metrics
                         result['catalytic_heavy_atom_rmsd'] = catalytic_metrics.get('catalytic_heavy_atom_rmsd', np.nan)
-                        result['ligand_clash_count_1_5A'] = catalytic_metrics.get('ligand_clash_count_1_5A', 0)
+                        result['ligand_clash_count_1_5A'] = catalytic_metrics.get('ligand_clash_count_1_5A', np.nan)
                     except Exception as e:
                         print(f"ERROR: Failed to compute AME-specific metrics for {sample_name}: {e}")
                         import traceback
                         traceback.print_exc()
-                        # Set default values for required metrics
-                        result['catalytic_heavy_atom_rmsd'] = np.nan
-                        result['ligand_clash_count_1_5A'] = 0
+                        result = self._ame_metric_error_row(str(e))
                 else:
-                    # No motif residues or missing files - set default values
-                    result['catalytic_heavy_atom_rmsd'] = np.nan
-                    result['ligand_clash_count_1_5A'] = 0
+                    missing_parts = []
+                    if not motif_residues:
+                        missing_parts.append("missing motif residues")
+                    if not os.path.exists(ref_backbone_path):
+                        missing_parts.append("missing reference backbone")
+                    if not os.path.exists(des_pdb_path):
+                        missing_parts.append("missing design backbone")
+                    if refold_path is None or not refold_path.exists():
+                        missing_parts.append("missing returned chai cif")
+                    result = self._ame_metric_error_row(", ".join(missing_parts) or "unknown metric precondition failure")
 
                 return sample_name, result
             except Exception as e:
@@ -1467,16 +1490,12 @@ class Evaluation():
                 except Exception:
                     print(f"ERROR: Error processing cand: {e}")
                     traceback.print_exc()
-                return None, None
-
-        raw_data = defaultdict(dict)
-        cands_obj = pickle.load(open(cands, "rb"))
-        print(f"{len(cands_obj)} files were found for evaluation.")
+                return sample_name, self._ame_metric_error_row(str(e))
 
         futures = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.metrics.num_workers) as executor:
-            for cand in cands_obj:
-                futures.append(executor.submit(process_metrics_worker, cand))
+            for cand, (sample_name, local_refold_path) in zip(cands_obj, sample_artifacts):
+                futures.append(executor.submit(process_metrics_worker, cand, sample_name, local_refold_path))
             for future in tqdm.tqdm(
                 concurrent.futures.as_completed(futures),
                 total=len(cands_obj),
@@ -1504,12 +1523,14 @@ class Evaluation():
         # 1. catalytic_heavy_atom_rmsd
         # 2. ligand_clash_count_1_5A (protein-ligand clash count)
         # 3. success
-        columns_to_keep = ['catalytic_heavy_atom_rmsd', 'ligand_clash_count_1_5A', 'success']
+        columns_to_keep = ['catalytic_heavy_atom_rmsd', 'ligand_clash_count_1_5A', 'success', 'metric_error']
         # Ensure all required columns exist, fill missing with NaN/False
         for col in columns_to_keep:
             if col not in df.columns:
                 if col == 'success':
                     df[col] = False
+                elif col == 'metric_error':
+                    df[col] = ""
                 else:
                     df[col] = np.nan
         
@@ -1777,6 +1798,73 @@ class Evaluation():
             f"Could not resolve reference backbone for sample '{sample_name}'. "
             f"Tried: {', '.join(str(p) for p in candidates)}"
         )
+
+    @staticmethod
+    def _ordered_chai_sample_names(pipeline_dir: str) -> list[str]:
+        pipeline_path = Path(pipeline_dir)
+        chai_input_dir = pipeline_path / "refold" / "chai1_inputs"
+        if chai_input_dir.is_dir():
+            names = [path.stem for path in sorted(chai_input_dir.glob("*.fasta"))]
+            if names:
+                return names
+
+        chai_out_dir = pipeline_path / "refold" / "chai1_out"
+        if chai_out_dir.is_dir():
+            names = [path.name for path in sorted(chai_out_dir.iterdir()) if path.is_dir()]
+            if names:
+                return names
+
+        raise FileNotFoundError(
+            f"Could not resolve source-side chai sample order under {pipeline_path / 'refold'}"
+        )
+
+    @staticmethod
+    def _resolve_local_chai_cif_path(pipeline_dir: str, sample_name: str) -> str:
+        sample_dir = Path(pipeline_dir) / "refold" / "chai1_out" / sample_name
+        if not sample_dir.is_dir():
+            raise FileNotFoundError(f"Returned chai sample directory not found: {sample_dir}")
+
+        preferred = sample_dir / "pred.model_0.cif"
+        if preferred.is_file():
+            return str(preferred.resolve())
+
+        cif_candidates = sorted(sample_dir.glob("*.cif"))
+        if cif_candidates:
+            return str(cif_candidates[0].resolve())
+
+        raise FileNotFoundError(f"No returned chai CIF found for sample '{sample_name}' under {sample_dir}")
+
+    @staticmethod
+    def _resolve_chai_sample_artifacts(
+        pipeline_dir: str,
+        cands: Sequence[Any],
+        *,
+        require_local_cifs: bool = True,
+    ) -> list[tuple[str, Optional[str]]]:
+        sample_names = Evaluation._ordered_chai_sample_names(pipeline_dir)
+        if len(sample_names) != len(cands):
+            raise ValueError(
+                "Source-side chai sample count does not match returned candidate count: "
+                f"{len(sample_names)} != {len(cands)}"
+            )
+        artifacts: list[tuple[str, Optional[str]]] = []
+        for sample_name in sample_names:
+            try:
+                local_cif_path = Evaluation._resolve_local_chai_cif_path(pipeline_dir, sample_name)
+            except FileNotFoundError:
+                if require_local_cifs:
+                    raise
+                local_cif_path = None
+            artifacts.append((sample_name, local_cif_path))
+        return artifacts
+
+    @staticmethod
+    def _ame_metric_error_row(error: str) -> dict[str, Any]:
+        return {
+            "catalytic_heavy_atom_rmsd": np.nan,
+            "ligand_clash_count_1_5A": np.nan,
+            "metric_error": str(error),
+        }
 
     @staticmethod
     def _ordered_chain_ids_for_structure(struct_path: str) -> list[str]:
