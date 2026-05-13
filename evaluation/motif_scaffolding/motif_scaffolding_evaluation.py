@@ -184,18 +184,28 @@ class MotifScaffoldingEvaluation:
             test_cases_path = None
             if hasattr(self.config, 'motif_scaffolding') and hasattr(self.config.motif_scaffolding, 'test_cases_csv'):
                 configured_test_cases = self.config.motif_scaffolding.test_cases_csv
-                if configured_test_cases:
-                    candidate = Path(str(configured_test_cases))
-                    if candidate.exists():
-                        test_cases_path = candidate
-                    else:
-                        self.logger.warning(
-                            f"Configured motif_scaffolding.test_cases_csv does not exist: {candidate}"
-                        )
+                if not configured_test_cases:
+                    raise ValueError(
+                        "motif_scaffolding.test_cases_csv must be configured for motif summary group mapping"
+                    )
+                candidate = Path(str(configured_test_cases))
+                if not candidate.is_absolute():
+                    repo_root = Path(__file__).resolve().parents[2]
+                    candidate = repo_root / candidate
+                candidate = candidate.resolve()
+                if candidate.exists():
+                    test_cases_path = candidate
+                else:
+                    raise FileNotFoundError(
+                        f"Configured motif_scaffolding.test_cases_csv does not exist: {candidate}"
+                    )
+            else:
+                raise ValueError(
+                    "motif_scaffolding.test_cases_csv must be configured for motif summary group mapping"
+                )
             
             cmd = [python_path, str(script_path), str(pipeline_dir)]
-            if test_cases_path:
-                cmd.extend(["--test-cases", str(test_cases_path)])
+            cmd.extend(["--test-cases", str(test_cases_path)])
             
             self.logger.info("Generating summary files...")
             result = subprocess.run(

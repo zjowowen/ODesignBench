@@ -2,6 +2,7 @@ import os
 import json
 import pickle
 import subprocess
+import shutil
 import numpy as np
 from pathlib import Path
 from time import perf_counter
@@ -14,6 +15,158 @@ from biotite.structure.io import pdb, pdbx
 import biotite.structure as struc
 import biotite.structure.io as io
 import sys
+
+_RNA_RESNAMES = {"A", "C", "G", "U", "N"}
+_DNA_RESNAMES = {"DA", "DC", "DG", "DT", "DN"}
+
+
+def _convert_structure_to_pdb(src_path: Path, dst_path: Path) -> Path:
+    """
+    Convert a structure file (PDB/CIF) to PDB for tools that require PDB input.
+    """
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    if src_path.suffix.lower() == ".pdb":
+        if src_path.resolve() != dst_path.resolve():
+            shutil.copy2(src_path, dst_path)
+        return dst_path
+    cif_file = pdbx.CIFFile.read(str(src_path))
+    atom_array = pdbx.get_structure(cif_file, model=1)
+    pdb_file = pdb.PDBFile()
+    pdb_file.set_structure(atom_array)
+    pdb_file.write(str(dst_path))
+    return dst_path
+
+
+def _read_structure_any(path: Path) -> struc.AtomArray:
+    """
+    Read PDB/CIF structure with optional b-factor annotations.
+    """
+    if path.suffix.lower() == ".cif":
+        cif_file = pdbx.CIFFile.read(str(path))
+        try:
+            return pdbx.get_structure(cif_file, model=1, extra_fields=["b_factor"])
+        except Exception:
+            return pdbx.get_structure(cif_file, model=1)
+    pdb_file = pdb.PDBFile.read(str(path))
+    try:
+        return pdb.get_structure(pdb_file, model=1, extra_fields=["b_factor"])
+    except Exception:
+        return pdb.get_structure(pdb_file, model=1)
+
+
+def _infer_nucleic_polymer_type(atom_array: struc.AtomArray) -> str:
+    """
+    Infer nucleic-acid polymer type from polymer chains.
+    Returns 'rna' or 'dna'.
+    """
+    detected_types: set[str] = set()
+    for chain_id in np.unique(atom_array.chain_id):
+        chain = atom_array[atom_array.chain_id == chain_id]
+        if len(chain) == 0:
+            continue
+        polymer = chain[~chain.hetero]
+        if len(polymer) == 0:
+            continue
+        res_set = set(np.unique(np.char.upper(polymer.res_name)))
+        if res_set and res_set.issubset(_RNA_RESNAMES):
+            detected_types.add("rna")
+        elif res_set and res_set.issubset(_DNA_RESNAMES):
+            detected_types.add("dna")
+
+    if not detected_types:
+        raise ValueError("No RNA/DNA polymer chain detected in structure")
+    if len(detected_types) > 1:
+        raise ValueError(
+            f"Mixed RNA/DNA polymers are not supported in nuc free-generation: {sorted(detected_types)}"
+        )
+    return next(iter(detected_types))
+
+
+def _pick_rna_design_chain(atom_array: struc.AtomArray) -> str:
+    """
+    Select RNA chain for design. Prefer chains marked as designable by b-factor=0.
+    """
+    candidate_chains: list[str] = []
+    for chain_id in np.unique(atom_array.chain_id):
+        chain = atom_array[atom_array.chain_id == chain_id]
+        if len(chain) == 0:
+            continue
+        polymer = chain[~chain.hetero]
+        if len(polymer) == 0:
+            continue
+        if not np.isin(np.unique(polymer.res_name), list(_RNA_RESNAMES)).all():
+            continue
+        candidate_chains.append(str(chain_id))
+
+    if not candidate_chains:
+        raise ValueError("No RNA polymer chain detected in structure")
+
+    design_by_bfactor: list[str] = []
+    for chain_id in candidate_chains:
+        chain = atom_array[atom_array.chain_id == chain_id]
+        if not hasattr(chain, "b_factor"):
+            continue
+        non_het = chain[~chain.hetero]
+        if len(non_het) == 0:
+            continue
+        if np.all(non_het.b_factor == 0.0):
+            design_by_bfactor.append(chain_id)
+
+    if len(design_by_bfactor) == 1:
+        return design_by_bfactor[0]
+    if len(design_by_bfactor) > 1:
+        raise ValueError(
+            f"Multiple RNA design chains marked by b_factor=0: {design_by_bfactor}. "
+            "Current pipeline expects exactly one designable RNA chain per backbone."
+        )
+    if len(candidate_chains) > 1:
+        raise ValueError(
+            f"Multiple RNA chains found without explicit b_factor marking: {candidate_chains}. "
+            "Set b_factor=0 for the design chain and b_factor=1 for fixed chains."
+        )
+    return candidate_chains[0]
+
+
+def _replace_rna_chain_sequence(
+    atom_array: struc.AtomArray,
+    chain_id: str,
+    sequence: str,
+) -> struc.AtomArray:
+    """
+    Replace residue names on one RNA chain according to one-letter RNA sequence.
+    """
+    sequence = sequence.upper().replace("T", "U")
+    if not sequence:
+        raise ValueError("Empty RNA sequence")
+    if not set(sequence).issubset(_RNA_RESNAMES):
+        invalid = sorted(set(sequence) - _RNA_RESNAMES)
+        raise ValueError(f"RNA sequence contains unsupported letters: {invalid}")
+
+    out = atom_array.copy()
+    residue_starts = struc.get_residue_starts(out, add_exclusive_stop=True)
+    seq_idx = 0
+    for r_s, r_e in zip(residue_starts[:-1], residue_starts[1:]):
+        if str(out.chain_id[r_s]) != str(chain_id):
+            continue
+        if bool(out.hetero[r_s]):
+            continue
+        res_name = str(out.res_name[r_s]).upper()
+        if res_name not in _RNA_RESNAMES:
+            continue
+        if seq_idx >= len(sequence):
+            raise ValueError(
+                f"RNA sequence shorter than residues in chain {chain_id}: "
+                f"replaced {seq_idx}, needed at least one more residue."
+            )
+        out.res_name[r_s:r_e] = sequence[seq_idx]
+        seq_idx += 1
+
+    if seq_idx != len(sequence):
+        raise ValueError(
+            f"RNA sequence length mismatch for chain {chain_id}: "
+            f"sequence has {len(sequence)} nts, replaced {seq_idx} residues."
+        )
+    return out
 
 def _collect_unk_residues(pdb_path: Path) -> set[str]:
     """
@@ -212,6 +365,8 @@ class InverseFold:
             "proteinmpnn": self.run_proteinmpnn_distributed,
             "odesignmpnn": self.run_odesignmpnn,
             "odesign": self.run_odesignmpnn,
+            "grnade": self.run_grnade,
+            "gRNAde": self.run_grnade,
         }
         if action not in dispatch:
             known = ", ".join(sorted(dispatch.keys()))
@@ -224,6 +379,158 @@ class InverseFold:
             details["elapsed_seconds"] = round(elapsed, 3)
         print(f"[timing] inversefold.{action}: {elapsed:.2f}s")
         return result
+
+    def run_grnade(
+        self,
+        input_dir: Path,
+        output_dir: str,
+        gpu_list: list,
+        n_samples: Optional[int] = None,
+        temperature: Optional[float] = None,
+        seed: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Run gRNAde for RNA inverse folding.
+        Output naming follows '<backbone_stem>-<sample_idx>.cif' for AF3/eval compatibility.
+        """
+        input_dir = Path(input_dir)
+        output_root = Path(output_dir)
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        converted_dir = output_root / "converted_pdb"
+        converted_dir.mkdir(parents=True, exist_ok=True)
+
+        n_samples_cfg = getattr(self.config.inversefold, "n_samples", None)
+        if n_samples is None:
+            n_samples = int(n_samples_cfg) if n_samples_cfg is not None else 8
+        temp_cfg = getattr(self.config.inversefold, "temperature", None)
+        if temperature is None:
+            temperature = float(temp_cfg) if temp_cfg is not None else 0.1
+        seed_cfg = getattr(self.config.inversefold, "seed", None)
+        if seed is None:
+            seed = int(seed_cfg) if seed_cfg is not None else 0
+
+        gpu_id = 0
+        if gpu_list:
+            try:
+                gpu_id = int(str(gpu_list[0]))
+            except ValueError:
+                gpu_id = 0
+
+        split = str(getattr(self.config.inversefold, "grnade_split", "all"))
+        max_num_conformers = int(getattr(self.config.inversefold, "grnade_max_num_conformers", 1))
+        nuc_input_type = str(getattr(self.config.inversefold, "nuc_input_type", "")).strip().lower()
+        if nuc_input_type not in {"rna", "dna"}:
+            raise ValueError(
+                f"Unsupported inversefold.nuc_input_type='{nuc_input_type}'. "
+                "Supported: rna, dna. "
+                "Please set explicitly, e.g. inversefold.nuc_input_type=rna."
+            )
+        model = None
+
+        struct_paths = sorted(input_dir.glob("*.cif")) + sorted(input_dir.glob("*.pdb"))
+        if not struct_paths:
+            raise FileNotFoundError(
+                f"No input structures under {input_dir}. Expected *.cif or *.pdb."
+            )
+
+        num_success = 0
+        num_failed = 0
+        num_outputs = 0
+        num_rna_inputs = 0
+        num_dna_inputs = 0
+        num_dna_passthrough = 0
+        failures: list[str] = []
+
+        for struct_path in struct_paths:
+            try:
+                atom_array = _read_structure_any(struct_path)
+                nuc_type = _infer_nucleic_polymer_type(atom_array)
+
+                if nuc_input_type == "rna" and nuc_type != "rna":
+                    raise ValueError(
+                        f"Input type mismatch for {struct_path.name}: "
+                        f"configured nuc_input_type='rna' but detected '{nuc_type}'."
+                    )
+                if nuc_input_type == "dna" and nuc_type != "dna":
+                    raise ValueError(
+                        f"Input type mismatch for {struct_path.name}: "
+                        f"configured nuc_input_type='dna' but detected '{nuc_type}'."
+                    )
+
+                if nuc_type == "dna":
+                    out_path = output_root / f"{struct_path.stem}.cif"
+                    io.save_structure(str(out_path), atom_array)
+                    num_dna_inputs += 1
+                    num_dna_passthrough += 1
+                    num_outputs += 1
+                    num_success += 1
+                    print(f"[gRNAde] DNA passthrough for {struct_path.name} -> {out_path.name}")
+                    continue
+
+                num_rna_inputs += 1
+                if model is None:
+                    from .gRNAde.gRNAde import gRNAde
+
+                    model = gRNAde(
+                        split=split,
+                        max_num_conformers=max_num_conformers,
+                        gpu_id=gpu_id,
+                    )
+
+                pdb_path = converted_dir / f"{struct_path.stem}.pdb"
+                _convert_structure_to_pdb(struct_path, pdb_path)
+                design_chain = _pick_rna_design_chain(atom_array)
+                print(f"[gRNAde] Designing {struct_path.name} on RNA chain '{design_chain}'")
+
+                records, _, _, _ = model.design_from_pdb_file(
+                    pdb_filepath=str(pdb_path),
+                    n_samples=n_samples,
+                    temperature=temperature,
+                    seed=seed,
+                )
+                if len(records) == 0:
+                    raise RuntimeError("gRNAde returned zero sequences")
+
+                for idx, record in enumerate(records, start=1):
+                    seq = str(record.seq).upper()
+                    out_arr = _replace_rna_chain_sequence(atom_array, design_chain, seq)
+                    out_path = output_root / f"{struct_path.stem}-{idx}.cif"
+                    io.save_structure(str(out_path), out_arr)
+                    num_outputs += 1
+
+                num_success += 1
+            except Exception as exc:
+                num_failed += 1
+                failures.append(f"{struct_path.name}: {exc}")
+                print(f"[gRNAde] Failed on {struct_path.name}: {exc}")
+
+        details: Dict[str, Any] = {
+            "num_inputs": len(struct_paths),
+            "num_success": num_success,
+            "num_failed": num_failed,
+            "n_samples_per_backbone": int(n_samples),
+            "num_outputs": num_outputs,
+            "num_rna_inputs": num_rna_inputs,
+            "num_dna_inputs": num_dna_inputs,
+            "num_dna_passthrough": num_dna_passthrough,
+            "nuc_input_type": nuc_input_type,
+            "gpu_id": gpu_id,
+            "temperature": float(temperature),
+            "seed": int(seed),
+            "grnade_split": split,
+            "grnade_max_num_conformers": max_num_conformers,
+        }
+        if failures:
+            details["failures"] = failures[:20]
+
+        success = num_success > 0 and num_outputs > 0
+        return self._make_result(
+            stage="inversefold.run_grnade",
+            output_dir=str(output_root),
+            success=success,
+            details=details,
+        )
 
     def run_ligandmpnn_distributed(
         self, 

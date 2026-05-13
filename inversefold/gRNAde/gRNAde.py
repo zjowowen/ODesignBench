@@ -50,6 +50,30 @@ CHECKPOINT_PATH = {
     # }
 }
 
+
+def _resolve_checkpoint_path(split: str, max_num_conformers: int) -> str:
+    """
+    Resolve checkpoint path with compatibility across old/new gRNAde releases.
+    Priority:
+    1) GRNADE_CHECKPOINT_PATH env override
+    2) Legacy filename used by ODesignBench's bundled gRNAde code
+    3) New HF main checkpoint filename
+    4) Static CHECKPOINT_PATH fallback
+    """
+    env_override = os.environ.get("GRNADE_CHECKPOINT_PATH", "").strip()
+    if env_override:
+        return env_override
+
+    ckpt_dir = Path(__file__).parent / "checkpoints"
+    legacy = ckpt_dir / "gRNAde_ARv1_1state_all.h5"
+    if legacy.exists():
+        return str(legacy)
+    preferred = ckpt_dir / "gRNAde_drop3d@0.75_maxlen@500.h5"
+    if preferred.exists():
+        return str(preferred)
+
+    return CHECKPOINT_PATH[split][max_num_conformers]
+
 # Default model hyperparameters (do not change)
 VERSION = 0.3
 RADIUS = 0.0
@@ -129,7 +153,7 @@ class gRNAde(object):
             out_dim = OUT_DIM
         )
         # Load model checkpoint
-        self.model_path = CHECKPOINT_PATH[split][max_num_conformers]
+        self.model_path = _resolve_checkpoint_path(split, max_num_conformers)
         print(f"    Loading model checkpoint: {self.model_path}")
         self.model.load_state_dict(torch.load(self.model_path, map_location=torch.device('cpu')))
 

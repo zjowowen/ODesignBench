@@ -1,9 +1,9 @@
 defaults:
   - refold: alphafold3
-  - inversefold: ProteinMPNN
+  - inversefold: InverseFold_nbl
   - metrics: protein_binding_protein
 
-design_dir: ${oc.env:DESIGN_DIR,examples/ODesign/protein_binding_protein}
+design_dir: ${oc.env:DESIGN_DIR,examples/ODesign/protein_binding_nuc}
 root: results
 gpus: 0
 

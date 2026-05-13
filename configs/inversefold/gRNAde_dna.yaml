@@ -1,0 +1,14 @@
+data_name: rna
+temp: 0.9
+topk: 4
+use_beam: true
+save_all: true
+model_dir: ${oc.env:INVERSEFOLD_MODEL_DIR,inversefold/InverseFold/ckpts}
+
+# DNA pipeline: passthrough (no inversefold redesign)
+nuc_input_type: dna
+n_samples: 8
+temperature: 0.1
+seed: 0
+grnade_split: all
+grnade_max_num_conformers: 1

@@ -68,12 +68,21 @@ def pdb_to_tensor(
     if keep_insertions:
         df["residue_id"] = df.residue_id + ":" + df.insertion
 
+    # Some generated structures store base nitrogen as generic "N" instead of
+    # base-specific "N1"/"N9". gRNAde backbone extraction expects N1/N9, so
+    # normalize atom names by residue type before tensorization.
+    if "atom_name" in df.columns and "residue_name" in df.columns:
+        n_mask = df["atom_name"] == "N"
+        if n_mask.any():
+            purine_mask = n_mask & df["residue_name"].isin(["A", "G"])
+            pyrimidine_mask = n_mask & df["residue_name"].isin(["C", "U"])
+            df.loc[purine_mask, "atom_name"] = "N9"
+            df.loc[pyrimidine_mask, "atom_name"] = "N1"
+
     # get sequence
     nt_list = [res.split(":")[1] for res in df.residue_id.unique()]
     # replace non-standard nucleotides with placeholder
-    # nt_list = [nt if nt in RNA_NUCLEOTIDES else "_" for nt in nt_list]
-    nt_list = ["A" for _ in nt_list] # for MMDiff evals only
-    # nt_list = ['A' for _ in nt_list]
+    nt_list = [nt if nt in RNA_NUCLEOTIDES else "_" for nt in nt_list]
     sequence = "".join(nt_list)
     
     if len(sequence) <= 1: 

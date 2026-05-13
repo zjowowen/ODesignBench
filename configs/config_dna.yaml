@@ -1,0 +1,14 @@
+defaults:
+  - refold: alphafold3
+  - inversefold: gRNAde_dna
+  - metrics: nucleotide_metrics
+
+design_dir: ${oc.env:DESIGN_DIR,examples/nuc/rna}
+root: results
+gpus: 0
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${root}/hydra
