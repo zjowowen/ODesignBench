@@ -245,7 +245,7 @@ def _odesign_mpnn_worker(
     """
     This is the function that each individual GPU process will run.
     """
-    from .InverseFold.utils.tools import reload_model, inference, _AA1_TO_AA3
+    from .OInvFold.evaluation_tools.tools import reload_model, inference, _AA1_TO_AA3
 
     _setup_distributed(local_rank, world_size)
     device = f"cuda:{local_rank}"
@@ -254,11 +254,36 @@ def _odesign_mpnn_worker(
         print("Workers started. Loading models on each GPU...")
 
     # 1. Load the model (each process loads its own copy)
+    checkpoint = Path(str(getattr(config.inversefold, "checkpoint_path", "")))
+    if not checkpoint.exists():
+        ckpt_root = Path(str(getattr(config.inversefold, "oinvfold_ckpt_root", "ckpt")))
+        if not ckpt_root.is_absolute():
+            ckpt_root = Path(__file__).resolve().parent.parent / ckpt_root
+        checkpoint = ckpt_root / f"oinvfold_{config.inversefold.data_name}.ckpt"
+    inv_cfg = getattr(config.inversefold, "oinvfold_model_cfg", None)
+    if inv_cfg is None:
+        inv_cfg = {
+            "dataset": "DNA",
+            "dataname": "DNA",
+            "model_name": "OInvFold",
+            "geo_layer": 3,
+            "attn_layer": 3,
+            "node_layer": 3,
+            "edge_layer": 3,
+            "encoder_layer": 12,
+            "hidden_dim": 128,
+            "dropout": 0.0,
+            "mask_rate": 0.1,
+            "k_neighbors": 30,
+            "virtual_frame_num": 8,
+            "virtual_atom_num": 3,
+            "steps_per_epoch": 7006,
+        }
     model, dev = reload_model(
-        data_name=config.inversefold.data_name, 
-        model_name="ODesign", 
+        data_name=config.inversefold.data_name,
+        checkpoint_path=str(checkpoint),
+        configs=inv_cfg,
         device=device,
-        model_dir=config.inversefold.model_dir
     )
 
     # 2. Get this process's unique data portion
@@ -272,10 +297,13 @@ def _odesign_mpnn_worker(
     for sample_dict in samples_for_this_rank:
         try:
             pred_seqs, scores, true_seq_masked, probs, metrics = inference(
-                model=model, sample_input=sample_dict['smp'], model_name="ODesign",
-                data_name=config.inversefold.data_name, topk=config.inversefold.topk,
-                temp=config.inversefold.temp, use_beam=config.inversefold.use_beam,
-                device=dev
+                model=model,
+                sample_input=sample_dict['smp'],
+                design_modality=config.inversefold.data_name,
+                topk=config.inversefold.topk,
+                temp=config.inversefold.temp,
+                use_beam=config.inversefold.use_beam,
+                device=dev,
             )
 
             # 4. Save results (from your original function)
@@ -365,6 +393,8 @@ class InverseFold:
             "proteinmpnn": self.run_proteinmpnn_distributed,
             "odesignmpnn": self.run_odesignmpnn,
             "odesign": self.run_odesignmpnn,
+            "oinvfold": self.run_oinvfold,
+            "OInvFold": self.run_oinvfold,
             "grnade": self.run_grnade,
             "gRNAde": self.run_grnade,
         }
@@ -379,6 +409,27 @@ class InverseFold:
             details["elapsed_seconds"] = round(elapsed, 3)
         print(f"[timing] inversefold.{action}: {elapsed:.2f}s")
         return result
+
+    def run_oinvfold(
+        self,
+        input_dir: Path,
+        output_dir: str,
+        gpu_list: list,
+        n_samples: Optional[int] = None,
+        temperature: Optional[float] = None,
+        use_beam: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        from .oinvfold_api import OInvFoldRunner
+
+        runner = OInvFoldRunner(self.config)
+        return runner.run(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            gpu_list=gpu_list,
+            n_samples=n_samples,
+            temperature=temperature,
+            use_beam=use_beam,
+        )
 
     def run_grnade(
         self,

@@ -6,7 +6,7 @@ from pipeline_framework import run_unified_pipeline
 
 @hydra.main(config_path="../configs", config_name="config_rna")
 def main(cfg: DictConfig):
-    run_unified_pipeline(cfg, task_name="nuc")
+    run_unified_pipeline(cfg, task_name="rna")
 
 
 if __name__ == "__main__":

@@ -99,6 +99,33 @@ python scripts/run_pbp_pipeline.py \
   inversefold.checkpoint_path=/absolute/path/to/proteinmpnn_v_48_020.pt
 ```
 
+## OInvFold Checkpoints
+
+`nbl` and `pbn` now use OInvFold inside ODesignBench, so inputs can be direct ODesign design outputs (no pre-applied inversefold required).
+
+Expected checkpoint filenames under `OINVFOLD_CKPT_ROOT` (default: `./ckpt`):
+
+- `oinvfold_protein.ckpt`
+- `oinvfold_ligand.ckpt`
+- `oinvfold_dna.ckpt`
+- `oinvfold_rna.ckpt`
+
+Download example:
+
+```bash
+mkdir -p ckpt
+wget -c -P ckpt -O ckpt/oinvfold_protein.ckpt "https://huggingface.co/The-Institute-for-AI-Molecular-Design/OInvFold/resolve/main/oinvfold_protein.ckpt"
+wget -c -P ckpt -O ckpt/oinvfold_ligand.ckpt "https://huggingface.co/The-Institute-for-AI-Molecular-Design/OInvFold/resolve/main/oinvfold_ligand.ckpt"
+wget -c -P ckpt -O ckpt/oinvfold_dna.ckpt "https://huggingface.co/The-Institute-for-AI-Molecular-Design/OInvFold/resolve/main/oinvfold_dna.ckpt"
+wget -c -P ckpt -O ckpt/oinvfold_rna.ckpt "https://huggingface.co/The-Institute-for-AI-Molecular-Design/OInvFold/resolve/main/oinvfold_rna.ckpt"
+```
+
+If checkpoints are stored elsewhere:
+
+```bash
+export OINVFOLD_CKPT_ROOT=/absolute/path/to/ckpt
+```
+
 ## ESMFold Weights
 
 To run ESMFold for refolding, you need to download the ESMFold model weights from Hugging Face. The scripts expect the weights to be located in `refold/esmfold/weights`.
@@ -247,15 +274,15 @@ After exporting the variables above, run the normal pipeline commands (e.g. `scr
 
 `run_rna_pipeline.py`: RNA free generation (gRNAde inversefold)
 
-`run_dna_pipeline.py`: DNA free generation 
+`run_dna_pipeline.py`: DNA free generation (OInvFold inversefold)
 
 - Input: nucleic-acid structure files (`.cif`/`.pdb`) in `design_dir`
 - Inverse fold:
   - RNA free generation: generate 8 RNA sequences per backbone using `gRNAde`
-  - DNA free generation: no inversefold (assumes input already undergone OInv redesign)
+  - DNA free generation: generate 8 DNA sequences per backbone using `OInvFold`
 - Config:
   - RNA: `config_rna.yaml` + `inversefold: gRNAde_rna`
-  - DNA: `config_dna.yaml` + `inversefold: gRNAde_dna`
+  - DNA: `config_dna.yaml` + `inversefold: OInvFold` (`inversefold.data_name=dna`, `inversefold.oinvfold_topk=8`)
 - Refold: AlphaFold3
 - Evaluation: C4' RMSD and TM-score
 
@@ -453,8 +480,8 @@ PBN evaluates designed protein-nucleic acid complexes, where the protein chain i
 
 - Input: sequence-assigned complex structures (`.cif` recommended)
 - Required metadata: `pbn_info.csv`
-- Current validated input contract: the input structures are already post-inversefold outputs (for example ODesign `*_bb_*_seq_*.cif`)
-- Inverse fold: skipped inside ODesignBench for this workflow; inputs are copied into `inverse_fold/` and treated as the post-inversefold reference structures
+- Current input contract: direct ODesign design outputs are accepted
+- Inverse fold: OInvFold (integrated in ODesignBench)
 - Refold: AlphaFold3
 - Evaluation: protein-aligned nucleic-acid `C4'` RMSD
 
@@ -491,11 +518,11 @@ python3 scripts/run_pbn_pipeline.py \
 Successful runs will write:
 
 - preprocessed inputs to `formatted_designs/`
-- copied post-inversefold references to `inverse_fold/`
+- OInvFold outputs to `inverse_fold/`
 - AlphaFold3 outputs to `refold/af3_out/`
 - final metrics to `raw_data.csv`
 
-The current evaluator aligns on shared protein `CA` residues and reports RMSD on shared nucleic-acid `C4'` atoms, so AF3 side-chain completion on the protein chain does not break scoring.
+The evaluator aligns on shared protein `CA` residues and reports RMSD on shared nucleic-acid `C4'` atoms.
 
 ### Protein Binding Ligand (PBL)
 

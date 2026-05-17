@@ -1,6 +1,6 @@
 defaults:
   - refold: alphafold3
-  - inversefold: InverseFold_nbl
+  - inversefold: OInvFold
   - metrics: nuc_binding_ligand
 
 design_dir: ${oc.env:DESIGN_DIR,examples/ODesign/nuc_binding_ligand}
@@ -13,3 +13,7 @@ hydra:
     chdir: false
   run:
     dir: ${root}/hydra
+
+inversefold:
+  data_name: ligand
+  oinvfold_topk: 1

@@ -1,0 +1,14 @@
+data_name: auto
+temp: 1.0
+topk: 1
+use_beam: true
+save_all: true
+
+# OInvFold checkpoint root; expects:
+#   oinvfold_protein.ckpt / oinvfold_ligand.ckpt / oinvfold_dna.ckpt / oinvfold_rna.ckpt
+oinvfold_ckpt_root: ${oc.env:OINVFOLD_CKPT_ROOT,ckpt}
+
+# Optional explicit checkpoint override (if set, this path is used directly).
+# checkpoint_path: /absolute/path/to/oinvfold_protein.ckpt
+
+# Optional model config override. If omitted, inversefold_api uses ODesign defaults.

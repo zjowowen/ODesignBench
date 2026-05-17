@@ -506,6 +506,15 @@ def _inversefold_nuc_grnade(ctx: PipelineContext) -> None:
     )
 
 
+def _inversefold_nuc_oinvfold(ctx: PipelineContext) -> None:
+    ctx.runtime["inversefold"] = _require_inversefold_model(ctx).run(
+        action="oinvfold",
+        input_dir=ctx.pipeline_dir / "formatted_designs",
+        output_dir=str(ctx.pipeline_dir / "inverse_fold"),
+        gpu_list=ctx.gpu_list,
+    )
+
+
 def _inversefold_proteinmpnn(ctx: PipelineContext) -> None:
     ctx.runtime["inversefold"] = _require_inversefold_model(ctx).run(
         action="proteinmpnn_distributed",
@@ -1245,16 +1254,30 @@ TASK_SPECS: dict[str, TaskSpec] = {
         refold_stage=_run_refold_af3,
         evaluation_plugins=[_plugin_nuc_eval],
     ),
+    "dna": TaskSpec(
+        preprocess_stage=_preprocess_cif,
+        inversefold_stage=_inversefold_nuc_oinvfold,
+        refold_prepare_stage=_prepare_refold_af3_from_inverse_fold,
+        refold_stage=_run_refold_af3,
+        evaluation_plugins=[_plugin_nuc_eval],
+    ),
+    "rna": TaskSpec(
+        preprocess_stage=_preprocess_cif,
+        inversefold_stage=_inversefold_nuc_grnade,
+        refold_prepare_stage=_prepare_refold_af3_from_inverse_fold,
+        refold_stage=_run_refold_af3,
+        evaluation_plugins=[_plugin_nuc_eval],
+    ),
     "nbl": TaskSpec(
         preprocess_stage=_preprocess_ligand,
-        inversefold_stage=_inversefold_odesign_to_inverse_fold,
+        inversefold_stage=_inversefold_nuc_oinvfold,
         refold_prepare_stage=_prepare_refold_af3_from_inverse_fold,
         refold_stage=_run_refold_af3,
         evaluation_plugins=[_plugin_nbl_eval],
     ),
     "pbn": TaskSpec(
         preprocess_stage=_preprocess_cif,
-        inversefold_stage=_inversefold_odesign_to_inverse_fold,
+        inversefold_stage=_inversefold_nuc_oinvfold,
         refold_prepare_stage=_prepare_refold_af3_from_inverse_fold,
         refold_stage=_run_refold_af3,
         evaluation_plugins=[_plugin_pbn_eval],

@@ -1,6 +1,6 @@
 defaults:
   - refold: alphafold3
-  - inversefold: InverseFold_nbl
+  - inversefold: OInvFold
   - metrics: protein_binding_protein
 
 design_dir: ${oc.env:DESIGN_DIR,examples/ODesign/protein_binding_nuc}
@@ -12,3 +12,7 @@ hydra:
     chdir: false
   run:
     dir: ${root}/hydra
+
+inversefold:
+  data_name: rna
+  oinvfold_topk: 4
