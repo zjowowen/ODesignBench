@@ -1160,7 +1160,7 @@ class Evaluation():
                 
             except Exception as e:
                 print(f"Warning: Error processing {refold_path}: {e}")
-                return None, None
+                return None
         
         raw_data = defaultdict(dict)
         cands = pickle.load(open(cands, 'rb'))
