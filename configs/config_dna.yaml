@@ -1,0 +1,18 @@
+defaults:
+  - refold: alphafold3
+  - inversefold: OInvFold
+  - metrics: nucleotide_metrics
+
+design_dir: ${oc.env:DESIGN_DIR,examples/nuc/dna}
+root: results
+gpus: 0
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${root}/hydra
+
+inversefold:
+  data_name: dna
+  oinvfold_topk: 8

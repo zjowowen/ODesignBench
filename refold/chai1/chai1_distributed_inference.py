@@ -625,6 +625,9 @@ class StructureCandidates:
 
     def __post_init__(self):
         assert len(self.cif_paths) == len(self.ranking_data) == self.pae.shape[0]
+        assert self.pde.shape == self.pae.shape
+        assert self.plddt.shape == self.pae.shape[:2]
+        assert self.token_asym_id.shape[0] == self.pae.shape[-1]
 
     def sorted(self) -> "StructureCandidates":
         """Sort by aggregate score from most to least confident."""
@@ -637,13 +640,15 @@ class StructureCandidates:
             pae=self.pae[idx],
             pde=self.pde[idx],
             plddt=self.plddt[idx],
-            token_asym_id=self.token_asym_id[idx]
+            token_asym_id=self.token_asym_id,
         )
 
     @classmethod
     def concat(
         cls, candidates: Sequence["StructureCandidates"]
     ) -> "StructureCandidates":
+        token_asym_id = candidates[0].token_asym_id
+        assert all(torch.equal(c.token_asym_id, token_asym_id) for c in candidates)
         return cls(
             cif_paths=list(
                 itertools.chain.from_iterable([c.cif_paths for c in candidates])
@@ -655,8 +660,19 @@ class StructureCandidates:
             pae=torch.cat([c.pae for c in candidates]),
             pde=torch.cat([c.pde for c in candidates]),
             plddt=torch.cat([c.plddt for c in candidates]),
-            token_asym_id=torch.cat([c.token_asym_id for c in candidates])
+            token_asym_id=token_asym_id,
         )
+
+def _masked_token_asym_id(token_asym_id: Tensor, token_mask_1d: Tensor) -> Tensor:
+    token_asym_id_1d = token_asym_id.squeeze(0).cpu()
+    token_mask_1d_cpu = token_mask_1d.cpu().bool()
+    if token_asym_id_1d.shape[0] != token_mask_1d_cpu.shape[0]:
+        raise ValueError(
+            "Token axis mismatch while masking token_asym_id: "
+            f"token_asym_id={tuple(token_asym_id_1d.shape)}, "
+            f"token_mask_1d={tuple(token_mask_1d_cpu.shape)}"
+        )
+    return token_asym_id_1d[token_mask_1d_cpu]
 
 def _bin_centers(min_bin: float, max_bin: float, no_bins: int) -> Tensor:
     return torch.linspace(min_bin, max_bin, 2 * no_bins + 1)[1::2]
@@ -1135,7 +1151,7 @@ def run_folding_on_context(
                 pae=pae_scores,
                 pde=pde_scores,
                 plddt=plddt_scores,
-                token_asym_id=inputs["token_asym_id"].squeeze(0)
+                token_asym_id=_masked_token_asym_id(inputs["token_asym_id"], token_mask_1d),
             ))
     # if global_rank == 0:
     #     print("Gathering results from all processes...")

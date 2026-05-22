@@ -5,7 +5,7 @@ defaults:
 
 design_dir: ${oc.env:DESIGN_DIR,examples/ODesign/protein_binding_protein}
 root: results
-gpus: 2,3
+gpus: 0
 
 hydra:
   job:

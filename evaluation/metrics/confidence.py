@@ -7,6 +7,15 @@ from biotite.structure import AtomArray, AtomArrayStack
 from biotite.structure.io import pdb, pdbx
 from typing import Iterable, Optional, Sequence, Tuple, List, Dict, Set
 
+def _as_numpy(value):
+    if hasattr(value, "detach"):
+        value = value.detach()
+    if hasattr(value, "cpu"):
+        value = value.cpu()
+    if hasattr(value, "numpy"):
+        return value.numpy()
+    return np.asarray(value)
+
 def calculate_ipae_info(pae_matrix: np.ndarray, chain_indices: np.ndarray) -> dict:
     """
     Calculate iPAE (interface PAE) related information from complete PAE matrix.
@@ -292,13 +301,30 @@ class Confidence:
             
             return plddt, ipae, min_ipae, iptm, ptm_binder
         
-        token_asym_id = cand.token_asym_id.numpy()
+        token_asym_id = _as_numpy(cand.token_asym_id)
         token_asym_id = token_asym_id[token_asym_id != 0]
-        plddt = np.mean(cand.plddt.squeeze(0).numpy())
-        pae = cand.pae.squeeze(0).numpy()
+        plddt_values = _as_numpy(cand.plddt)
+        if plddt_values.ndim == 2:
+            plddt_values = plddt_values[0]
+        pae = _as_numpy(cand.pae)
+        if pae.ndim == 3:
+            pae = pae[0]
+        if pae.ndim != 2:
+            raise ValueError(f"Expected Chai PAE to be 2D after candidate selection, got shape {pae.shape}.")
+        if pae.shape[0] != len(token_asym_id):
+            raise ValueError(
+                "PAE matrix dimensions do not match token_asym_id length: "
+                f"pae={pae.shape}, token_asym_id={token_asym_id.shape}."
+            )
+        if plddt_values.shape[0] != len(token_asym_id):
+            raise ValueError(
+                "pLDDT dimensions do not match token_asym_id length: "
+                f"plddt={plddt_values.shape}, token_asym_id={token_asym_id.shape}."
+            )
+        plddt = np.mean(plddt_values)
         ipae_info = calculate_ipae_info(pae, token_asym_id)
         ipae, min_ipae = ipae_info['mean_ipae'], ipae_info['min_ipae']
-        iptm = cand.ranking_data[0].ptm_scores.interface_ptm.numpy()
+        iptm = _as_numpy(cand.ranking_data[0].ptm_scores.interface_ptm)
         
         # Try to read PDB file for ptm_binder calculation
         ptm_binder = np.nan
@@ -309,7 +335,7 @@ class Confidence:
                 chains_to_design = str(atom_array.chain_id[atom_array.b_factor == 0][0])
                 binder_id = letter_to_number(chains_to_design)
                 if binder_id is not None and binder_id > 0:
-                    ptm_binder = cand.ranking_data[0].ptm_scores.per_chain_ptm[0, binder_id - 1].numpy()
+                    ptm_binder = _as_numpy(cand.ranking_data[0].ptm_scores.per_chain_ptm[0, binder_id - 1])
             except (FileNotFoundError, IndexError, ValueError, KeyError) as e:
                 # If PDB file doesn't exist or parsing fails, ptm_binder remains NaN
                 pass

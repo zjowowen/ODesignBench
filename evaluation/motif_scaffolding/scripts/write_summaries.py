@@ -104,7 +104,7 @@ def generate_summary_by_problem(base_output_dir: Path, output_path: Optional[Pat
 
 
 def generate_overall_summary(
-    test_cases_path: Optional[Path],
+    test_cases_path: Path,
     summary_by_problem_path: Path,
     overall_summary_path: Path
 ) -> Path:
@@ -119,28 +119,40 @@ def generate_overall_summary(
     Returns:
         Path to generated overall_summary.csv
     """
+    if not test_cases_path.is_file():
+        raise FileNotFoundError(
+            f"Missing required test_cases.csv for motif group mapping: {test_cases_path}"
+        )
+    if test_cases_path.stat().st_size == 0:
+        raise ValueError(
+            f"test_cases.csv is empty and cannot be used for group mapping: {test_cases_path}"
+        )
+
+    test_cases = pd.read_csv(test_cases_path)
+    required_columns = {"pdb_id", "group"}
+    missing_columns = required_columns.difference(set(test_cases.columns))
+    if missing_columns:
+        raise ValueError(
+            "test_cases.csv missing required columns: "
+            + ", ".join(sorted(missing_columns))
+        )
+    if test_cases.empty:
+        raise ValueError(f"test_cases.csv has no rows: {test_cases_path}")
+
     # Load test cases to get group mapping
     problem_to_group = {}
-    if test_cases_path is not None and test_cases_path.is_file():
-        try:
-            # Avoid reading empty placeholders like /dev/null.
-            if test_cases_path.stat().st_size > 0:
-                test_cases = pd.read_csv(test_cases_path)
-                test_cases['idx'] = [i + 1 for i in range(len(test_cases))]
+    test_cases = test_cases.copy()
+    test_cases['idx'] = [i + 1 for i in range(len(test_cases))]
 
-                # Create mapping from Problem name (e.g., "01_1LDB") to group
-                # Problem format: "01_1LDB" -> extract "01" -> idx=1 -> group
-                for _, row in test_cases.iterrows():
-                    idx = row['idx']
-                    pdb_id = row.get('pdb_id', '')
-                    # Try to match problem names like "01_1LDB", "02_1ITU", etc.
-                    problem_name = f"{idx:02d}_{pdb_id}"
-                    problem_to_group[problem_name] = row.get('group', 'unknown')
-                    # Also add just the PDB ID as fallback
-                    problem_to_group[pdb_id] = row.get('group', 'unknown')
-        except pd.errors.EmptyDataError:
-            # Keep empty mapping when test_cases CSV has no rows/content.
-            problem_to_group = {}
+    # Create mapping from Problem name (e.g., "01_1LDB") to group
+    # Problem format: "01_1LDB" -> extract "01" -> idx=1 -> group
+    for _, row in test_cases.iterrows():
+        idx = row['idx']
+        pdb_id = row.get('pdb_id', '')
+        problem_name = f"{idx:02d}_{pdb_id}"
+        problem_to_group[problem_name] = row.get('group', 'unknown')
+        # Also add just the PDB ID as fallback
+        problem_to_group[pdb_id] = row.get('group', 'unknown')
     
     # Load summary by problem
     summary_by_problem = pd.read_csv(summary_by_problem_path)
@@ -159,34 +171,32 @@ def generate_overall_summary(
     
     summary_by_problem['group'] = summary_by_problem['Problem'].apply(get_group)
     
+    unmapped = summary_by_problem[summary_by_problem['group'] == 'unknown']['Problem'].tolist()
+    if unmapped:
+        raise ValueError(
+            "Unmapped motif problems detected in summary generation. "
+            "Please ensure test_cases.csv matches benchmark problems. "
+            f"Unmapped: {', '.join(unmapped)}"
+        )
+
     # Group by group and calculate statistics
-    if 'group' in summary_by_problem.columns and len(summary_by_problem) > 0:
-        summary_by_group = summary_by_problem.groupby('group').agg(
-            Number_Solved=('Num_Solutions', lambda x: (x > 0).sum()),
-            Mean_Num_Solutions=('Num_Solutions', 'mean'),
-            Mean_Novelty=('Novelty', 'mean'),
-            Mean_Success_rate=('Success_Rate', 'mean')
-        ).reset_index()
-        
-        summary_by_group.rename(columns={'group': 'Group'}, inplace=True)
-        
-        # Add overall row
-        summary_by_group.loc[len(summary_by_group)] = {
-            "Group": "overall",
-            "Number_Solved": int(summary_by_group["Number_Solved"].sum()),
-            "Mean_Num_Solutions": float(summary_by_group["Mean_Num_Solutions"].mean()),
-            "Mean_Novelty": float(summary_by_group["Mean_Novelty"].mean()),
-            "Mean_Success_rate": float(summary_by_group["Mean_Success_rate"].mean()),
-        }
-    else:
-        # Fallback: create summary with overall only
-        summary_by_group = pd.DataFrame([{
-            "Group": "overall",
-            "Number_Solved": int((summary_by_problem['Num_Solutions'] > 0).sum()) if len(summary_by_problem) > 0 else 0,
-            "Mean_Num_Solutions": float(summary_by_problem['Num_Solutions'].mean()) if len(summary_by_problem) > 0 else 0.0,
-            "Mean_Novelty": float(summary_by_problem['Novelty'].mean()) if len(summary_by_problem) > 0 else 0.0,
-            "Mean_Success_rate": float(summary_by_problem['Success_Rate'].mean()) if len(summary_by_problem) > 0 else 0.0,
-        }])
+    summary_by_group = summary_by_problem.groupby('group').agg(
+        Number_Solved=('Num_Solutions', lambda x: (x > 0).sum()),
+        Mean_Num_Solutions=('Num_Solutions', 'mean'),
+        Mean_Novelty=('Novelty', 'mean'),
+        Mean_Success_rate=('Success_Rate', 'mean')
+    ).reset_index()
+
+    summary_by_group.rename(columns={'group': 'Group'}, inplace=True)
+
+    # Add overall row
+    summary_by_group.loc[len(summary_by_group)] = {
+        "Group": "overall",
+        "Number_Solved": int(summary_by_group["Number_Solved"].sum()),
+        "Mean_Num_Solutions": float(summary_by_group["Mean_Num_Solutions"].mean()),
+        "Mean_Novelty": float(summary_by_group["Mean_Novelty"].mean()),
+        "Mean_Success_rate": float(summary_by_group["Mean_Success_rate"].mean()),
+    }
     
     # Calculate MotifBench Score
     # Formula: (100 + alpha) * Num_Solutions / (Num_Solutions + alpha) where alpha=5
@@ -240,11 +250,11 @@ def main():
     test_cases_path = Path(args.test_cases) if args.test_cases else None
     overall_summary_path = Path(args.overall_summary) if args.overall_summary else base_output_dir / "overall_summary.csv"
     
-    if test_cases_path and test_cases_path.exists():
-        generate_overall_summary(test_cases_path, summary_by_problem_path, overall_summary_path)
-    else:
-        # Generate without group mapping
-        generate_overall_summary(None, summary_by_problem_path, overall_summary_path)
+    if not test_cases_path:
+        raise ValueError(
+            "--test-cases is required to avoid unknown motif groups in overall_summary.csv"
+        )
+    generate_overall_summary(test_cases_path, summary_by_problem_path, overall_summary_path)
     
     print(f"Summary files generated:")
     print(f"  - {summary_by_problem_path}")

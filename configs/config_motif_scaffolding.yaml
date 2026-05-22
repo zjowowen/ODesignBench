@@ -22,3 +22,7 @@ hydra:
     chdir: false
   run:
     dir: ${root}/hydra
+
+inversefold:
+  batch_size: 4
+  number_of_batches: 1

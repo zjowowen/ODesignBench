@@ -1,11 +1,13 @@
 refold/esmfold/weights/
 refold/chai1/weights/
 inversefold/LigandMPNN/model_params/
+inversefold/gRNAde/checkpoints
 preprocess/ccd_component/
 
 output/
 results/
 tmp/
+ckpt/
 
 venv/
 .env

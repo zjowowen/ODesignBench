@@ -497,6 +497,24 @@ def _inversefold_passthrough_formatted_designs(ctx: PipelineContext) -> None:
     }
 
 
+def _inversefold_nuc_grnade(ctx: PipelineContext) -> None:
+    ctx.runtime["inversefold"] = _require_inversefold_model(ctx).run(
+        action="grnade",
+        input_dir=ctx.pipeline_dir / "formatted_designs",
+        output_dir=str(ctx.pipeline_dir / "inverse_fold"),
+        gpu_list=ctx.gpu_list,
+    )
+
+
+def _inversefold_nuc_oinvfold(ctx: PipelineContext) -> None:
+    ctx.runtime["inversefold"] = _require_inversefold_model(ctx).run(
+        action="oinvfold",
+        input_dir=ctx.pipeline_dir / "formatted_designs",
+        output_dir=str(ctx.pipeline_dir / "inverse_fold"),
+        gpu_list=ctx.gpu_list,
+    )
+
+
 def _inversefold_proteinmpnn(ctx: PipelineContext) -> None:
     ctx.runtime["inversefold"] = _require_inversefold_model(ctx).run(
         action="proteinmpnn_distributed",
@@ -610,15 +628,6 @@ def _inversefold_odesign_to_inverse_fold(ctx: PipelineContext) -> None:
         action="odesignmpnn",
         input_root=ctx.pipeline_dir / "formatted_designs",
         inverse_fold_root=ctx.pipeline_dir / "inverse_fold",
-    )
-
-
-def _inversefold_odesign_to_inversefold(ctx: PipelineContext) -> None:
-    # Keep compatibility with existing PBL output directory naming.
-    ctx.runtime["inversefold"] = _require_inversefold_model(ctx).run(
-        action="odesignmpnn",
-        input_root=ctx.pipeline_dir / "formatted_designs",
-        inverse_fold_root=ctx.pipeline_dir / "inversefold",
     )
 
 
@@ -1165,16 +1174,22 @@ def _generate_motif_scaffolding_summaries(ctx: PipelineContext) -> None:
         configured_test_cases = motif_cfg.get("test_cases_csv", None)
     else:
         configured_test_cases = getattr(motif_cfg, "test_cases_csv", None)
-    if configured_test_cases:
-        candidate = Path(str(configured_test_cases))
-        if candidate.exists():
-            test_cases_path = candidate
-        else:
-            print(f"[unified] Warning: motif_scaffolding.test_cases_csv not found: {candidate}")
+    if not configured_test_cases:
+        raise ValueError(
+            "motif_scaffolding.test_cases_csv must be configured for motif summary group mapping"
+        )
+    candidate = Path(str(configured_test_cases))
+    if not candidate.is_absolute():
+        candidate = Path(ctx.origin_cwd) / candidate
+    candidate = candidate.resolve()
+    if not candidate.exists():
+        raise FileNotFoundError(
+            f"Configured motif_scaffolding.test_cases_csv does not exist: {candidate}"
+        )
+    test_cases_path = candidate
 
     cmd = [str(python_path), str(script_path), str(ctx.pipeline_dir)]
-    if test_cases_path is not None:
-        cmd.extend(["--test-cases", str(test_cases_path)])
+    cmd.extend(["--test-cases", str(test_cases_path)])
 
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
@@ -1234,21 +1249,35 @@ TASK_SPECS: dict[str, TaskSpec] = {
     ),
     "nuc": TaskSpec(
         preprocess_stage=_preprocess_cif,
-        inversefold_stage=_inversefold_passthrough_formatted_designs,
+        inversefold_stage=_inversefold_nuc_grnade,
+        refold_prepare_stage=_prepare_refold_af3_from_inverse_fold,
+        refold_stage=_run_refold_af3,
+        evaluation_plugins=[_plugin_nuc_eval],
+    ),
+    "dna": TaskSpec(
+        preprocess_stage=_preprocess_cif,
+        inversefold_stage=_inversefold_nuc_oinvfold,
+        refold_prepare_stage=_prepare_refold_af3_from_inverse_fold,
+        refold_stage=_run_refold_af3,
+        evaluation_plugins=[_plugin_nuc_eval],
+    ),
+    "rna": TaskSpec(
+        preprocess_stage=_preprocess_cif,
+        inversefold_stage=_inversefold_nuc_grnade,
         refold_prepare_stage=_prepare_refold_af3_from_inverse_fold,
         refold_stage=_run_refold_af3,
         evaluation_plugins=[_plugin_nuc_eval],
     ),
     "nbl": TaskSpec(
         preprocess_stage=_preprocess_ligand,
-        inversefold_stage=_inversefold_odesign_to_inverse_fold,
+        inversefold_stage=_inversefold_nuc_oinvfold,
         refold_prepare_stage=_prepare_refold_af3_from_inverse_fold,
         refold_stage=_run_refold_af3,
         evaluation_plugins=[_plugin_nbl_eval],
     ),
     "pbn": TaskSpec(
         preprocess_stage=_preprocess_cif,
-        inversefold_stage=_inversefold_odesign_to_inverse_fold,
+        inversefold_stage=_inversefold_nuc_oinvfold,
         refold_prepare_stage=_prepare_refold_af3_from_inverse_fold,
         refold_stage=_run_refold_af3,
         evaluation_plugins=[_plugin_pbn_eval],
@@ -1296,7 +1325,7 @@ def run_unified_pipeline(cfg: object, task_name: str) -> PipelineContext:
         raise FileNotFoundError(f"design_dir not found: {design_dir}")
 
     inversefold_model = None
-    if spec.inversefold_stage not in (None, _inversefold_passthrough_formatted_designs):
+    if spec.inversefold_stage is not None:
         from inversefold.inversefold_api import InverseFold
 
         inversefold_model = InverseFold(cfg)

@@ -6,8 +6,8 @@
 python_path: null
 
 # Path to MotifBench test_cases.csv for group mapping in summaries.
-# If null, summary generation will not populate benchmark groups.
-test_cases_csv: null
+# Keep this repo-local to avoid accidental external-path dependency.
+test_cases_csv: assets/motif_scaffolding/test_cases.csv
 
 # Foldseek configuration (required for diversity and novelty metrics)
 # Install foldseek: conda install -c conda-forge -c bioconda foldseek
