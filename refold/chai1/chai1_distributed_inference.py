@@ -107,7 +107,10 @@ from typing import Sequence
 
 import numpy as np
 import torch
-import torch.export
+try:
+    import torch.export
+except ModuleNotFoundError:
+    pass
 from einops import einsum, rearrange, repeat
 from torch import Tensor
 from tqdm import tqdm

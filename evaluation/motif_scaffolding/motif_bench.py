@@ -850,13 +850,20 @@ class MotifBenchEvaluator:
         foldseek_bin: Optional[str] = None,
     ) -> Dict:
         """Calculate diversity using alpha=5 saturation curve."""
+        zero_result = {
+            'Diversity': 0,
+            'Clusters': 0,
+            'Samples': 0,
+            'Alpha5_Clusters': 0,
+        }
         if self.du is None:
-            return {'Diversity': 0, 'Clusters': 0, 'Samples': 0, 'Alpha5_Clusters': 0}
-        
+            return zero_result.copy()
+
         target_clusters = 5
         thresholds = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
         best_result = None
         best_diff = float('inf')
+        last_error = None
         
         for threshold in thresholds:
             try:
@@ -882,20 +889,16 @@ class MotifBenchEvaluator:
                 if diff <= 1:
                     break
             except Exception as e:
+                last_error = e
                 self.logger.warning(f"Error clustering with threshold {threshold}: {e}")
                 continue
-        
+
         if best_result is None:
-            best_result = self.du.foldseek_cluster(
-                input=str(successful_dir),
-                assist_protein_path=str(assist_protein),
-                tmscore_threshold=0.6,
-                alignment_type=1,
-                output_mode="DICT",
-                save_tmp=True,
-                foldseek_path=foldseek_bin,
+            self.logger.warning(
+                "Foldseek clustering failed for all diversity thresholds; "
+                "returning zero diversity metrics. Last error: %s",
+                last_error,
             )
-            best_result['Alpha5_Clusters'] = best_result.get('Clusters', 0)
-            best_result['Alpha5_Threshold'] = 0.6
-        
+            return zero_result.copy()
+
         return best_result

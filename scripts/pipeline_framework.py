@@ -312,12 +312,16 @@ def _plugin_pbn_eval(ctx: PipelineContext) -> None:
 
 
 def _plugin_pbl_eval(ctx: PipelineContext) -> None:
+    import os
+
     # Legacy PBL path uses pre-refold inputs for evaluation.
     eval_input = ctx.pipeline_dir / "inversefold_formatted_designs_for_evaluation"
+    num_processes = int(os.environ.get("PBL_EVAL_NUM_PROCESSES", 8))
     ctx.runtime["evaluation_pbl"] = ctx.evaluation_model.run(
         task="pbl",
         input_dir=str(eval_input),
         output_dir=str(ctx.pipeline_dir / "inversefold_formatted_designs_for_evaluation_metrics"),
+        num_processes=num_processes,
     )
 
 
