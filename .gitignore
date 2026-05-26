@@ -21,3 +21,10 @@ __pycache__/
 .mypy_cache/
 .ipynb_checkpoints/
 *.log
+
+agentic_design/ 
+
+# Keep ad-hoc job scripts ignored, but allow the curated PBL JSON workflow.
+scripts/jobs/*
+scripts/jobs/pbljson/
+scripts/jobs/pbljson/**

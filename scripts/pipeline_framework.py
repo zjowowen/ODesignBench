@@ -286,10 +286,14 @@ def _plugin_pbn_eval(ctx: PipelineContext) -> None:
 def _plugin_pbl_eval(ctx: PipelineContext) -> None:
     # Legacy PBL path uses pre-refold inputs for evaluation.
     eval_input = ctx.pipeline_dir / "inversefold_formatted_designs_for_evaluation"
+    metrics_cfg = getattr(ctx.cfg, "metrics", None)
+    num_processes = int(getattr(metrics_cfg, "num_workers", 8)) if metrics_cfg is not None else 8
     ctx.runtime["evaluation_pbl"] = ctx.evaluation_model.run(
         task="pbl",
         input_dir=str(eval_input),
         output_dir=str(ctx.pipeline_dir / "inversefold_formatted_designs_for_evaluation_metrics"),
+        num_processes=num_processes,
+        cuda_device=os.environ.get("CUDA_VISIBLE_DEVICES", ""),
     )
 
 

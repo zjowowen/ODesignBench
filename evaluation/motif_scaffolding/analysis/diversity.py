@@ -55,9 +55,6 @@ def foldseek_cluster(
             --db-load-mode 1 \
             -v 0'
 
-    if foldseek_path is not None:
-        cmd = cmd.replace('foldseek', str(foldseek_path))
-
     assist_num = 0
     try:
         subprocess.run(cmd, shell=True, check=True)

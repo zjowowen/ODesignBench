@@ -886,16 +886,28 @@ class MotifBenchEvaluator:
                 continue
         
         if best_result is None:
-            best_result = self.du.foldseek_cluster(
-                input=str(successful_dir),
-                assist_protein_path=str(assist_protein),
-                tmscore_threshold=0.6,
-                alignment_type=1,
-                output_mode="DICT",
-                save_tmp=True,
-                foldseek_path=foldseek_bin,
-            )
-            best_result['Alpha5_Clusters'] = best_result.get('Clusters', 0)
-            best_result['Alpha5_Threshold'] = 0.6
-        
+            try:
+                best_result = self.du.foldseek_cluster(
+                    input=str(successful_dir),
+                    assist_protein_path=str(assist_protein),
+                    tmscore_threshold=0.6,
+                    alignment_type=1,
+                    output_mode="DICT",
+                    save_tmp=True,
+                    foldseek_path=foldseek_bin,
+                )
+                best_result['Alpha5_Clusters'] = best_result.get('Clusters', 0)
+                best_result['Alpha5_Threshold'] = 0.6
+            except Exception as e:
+                # assist_protein may be too short (< 14 residues/chain) for foldseek k-mer indexing.
+                # Fall back to zero diversity rather than crashing the episode.
+                self.logger.warning(
+                    f"Foldseek fallback also failed (assist_protein may be too short): {e}. "
+                    "Returning zero diversity."
+                )
+                best_result = {
+                    'Diversity': 0, 'Clusters': 0, 'Samples': 0,
+                    'Alpha5_Clusters': 0, 'Alpha5_Threshold': 0.6,
+                }
+
         return best_result
