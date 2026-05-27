@@ -1,0 +1,18 @@
+[
+  {
+    "name": "6cm4",
+    "ref_file": "/mnt/shared-storage-user/liuxinping/ODesignBench/examples/protein_binding_ligand/6cases_pocket/6cases_pocket/6cm4_pocket.pdb",
+    "chains": [
+      {
+        "chain_type": "proteinChain",
+        "sequence": "A/41-41,A/76-76,A/79-80,A/83-83,A/87-95,A/98-100,A/102-102,A/107-107,A/110-126,A/159-159,A/163-163,A/166-167,A/170-170,A/183-185,A/189-203,A/205-205,A/379-379,A/382-383,A/385-390,A/392-392,A/396-396,A/403-419"
+      },
+      {
+        "chain_type": "ligand",
+        "sequence": "30-30"
+      }
+    ],
+    "hotspot": "A/41,A/76,A/79,A/80,A/83,A/87,A/88,A/89,A/90,A/91,A/92,A/93,A/94,A/95,A/98,A/99,A/100,A/102,A/107,A/110,A/111,A/112,A/113,A/114,A/115,A/116,A/117,A/118,A/119,A/120,A/121,A/122,A/123,A/124,A/125,A/126,A/159,A/163,A/166,A/167,A/170,A/183,A/184,A/185,A/189,A/190,A/191,A/192,A/193,A/194,A/195,A/196,A/197,A/198,A/199,A/200,A/201,A/202,A/203,A/205,A/379,A/382,A/383,A/385,A/386,A/387,A/388,A/389,A/390,A/392,A/396,A/403,A/404,A/405,A/406,A/407,A/408,A/409,A/410,A/411,A/412,A/413,A/414,A/415,A/416,A/417,A/418,A/419",
+    "center_method": "hotspot_center"
+  }
+]
